@@ -167,8 +167,6 @@ compute::kernel_t make_kernel(gpu_primitive_t *primitive, bool register_kernel,
                 *device_info, std::forward<ArgsT>(args)...); \
         break;
     switch (arch) {
-        REG_GEN9_ISA(CASE(gpu_gen9));
-        REG_GEN11_ISA(CASE(gpu_gen11));
         REG_XELP_ISA(CASE(gpu_xe_lp));
         REG_XEHP_ISA(CASE(gpu_xe_hp));
         REG_XEHPG_ISA(CASE(gpu_xe_hpg));

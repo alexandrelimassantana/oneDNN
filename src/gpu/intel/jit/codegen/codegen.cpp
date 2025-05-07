@@ -1686,12 +1686,6 @@ void convert_ir_to_ngen(const stmt_t &body, ngen_generator_t *host,
     convert_ir_to_ngen_impl(body, host, kernel_grid_walk_order);
 }
 
-REG_GEN9_ISA(template void convert_ir_to_ngen(const stmt_t &body,
-        ir_kernel_t<ngen::HW::Gen9> *host,
-        const walk_order_t *kernel_grid_walk_order));
-REG_GEN11_ISA(template void convert_ir_to_ngen(const stmt_t &body,
-        ir_kernel_t<ngen::HW::Gen11> *host,
-        const walk_order_t *kernel_grid_walk_order));
 REG_XELP_ISA(template void convert_ir_to_ngen(const stmt_t &body,
         ir_kernel_t<ngen::HW::XeLP> *host,
         const walk_order_t *kernel_grid_walk_order));
