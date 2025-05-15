@@ -33,6 +33,8 @@ import os
 import sys
 import subprocess
 
+from datetime import date
+
 def whereis(binary):
     command = 'which' if os.name != 'nt' else 'where'
     try:
@@ -116,7 +118,7 @@ imgmath_latex_preamble = '''\\usepackage[T1]{fontenc}
 # Add any paths that contain templates here, relative to this directory.
 templates_path = ['_templates']
 
-source_suffix = '.rst'
+source_suffix = ['.rst', '.md']
 
 # List of patterns, relative to source directory, that match files and
 # directories to ignore when looking for source files.
@@ -125,7 +127,7 @@ exclude_patterns = ['_build', 'Thumbs.db', '.DS_Store',]
 
 exclude_patterns += ['page_index.rst']
 # -- Options for HTML output -------------------------------------------------
-
+today = str(date.today().strftime('%d %B, %Y'))
 # The theme to use for HTML and HTML Help pages.  See the documentation for
 # a list of builtin themes.
 #
@@ -146,7 +148,9 @@ html_theme_options = {
     "use_repository_button": True,
     "use_download_button": True,
     "path_to_docs": "doc",
-    "use_issues_button": True
+    "use_issues_button": True,
+    "extra_footer": "<div>Last updated: " + today + "</div>"
+    
 }
 
 mathjax3_config = {
@@ -190,6 +194,7 @@ mathjax3_config = {
         }
     }
 }
+
 
 def setup(app):
     app.connect('env-before-read-docs', fixFileNameRefs)
@@ -243,3 +248,4 @@ def addTocTrees(app, env, docnames):
                 tocTree += "   " + file + "\n"
             tocTree += "\n\n"
             f.write(tocTree)
+
