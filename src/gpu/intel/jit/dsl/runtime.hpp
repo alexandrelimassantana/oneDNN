@@ -40,6 +40,14 @@ inline cl_kernel make_kernel(
             kernel.debug_cfg, ctx, dev);
 }
 #endif
+#ifdef WITH_L0_RUNTIME
+inline std::pair<ze_module_handle_t, ze_kernel_handle_t> make_kernel(
+        const kernel_t &kernel, ze_context_handle_t ctx,
+        ze_device_handle_t dev) {
+    return make_kernel(kernel.iface, kernel.body, kernel.options,
+            kernel.debug_cfg, ctx, dev);
+}
+#endif
 
 } // namespace dsl
 } // namespace jit

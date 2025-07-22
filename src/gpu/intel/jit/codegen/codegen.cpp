@@ -37,6 +37,9 @@
 #ifdef WITH_OPENCL_RUNTIME
 #include "ngen_opencl.hpp"
 #endif
+#ifdef WITH_L0_RUNTIME
+#include "ngen_level_zero.hpp"
+#endif
 
 namespace dnnl {
 namespace impl {
@@ -1809,6 +1812,29 @@ cl_kernel make_kernel(const kernel::iface_t &iface, const stmt_t &body,
     g.setInterface(std::move(interface)); \
     convert_ir_to_ngen(body, g); \
     return g.getKernel(ctx, dev);
+
+    GPU_HW_SWITCH(options.hw().ngen_hw());
+#undef GPU_HW_CASE
+    return {};
+}
+#endif
+
+#ifdef WITH_L0_RUNTIME
+std::pair<ze_module_handle_t, ze_kernel_handle_t> make_kernel(
+        const kernel::iface_t &iface, const stmt_t &body,
+        const kernel::options_t &options, const ngen::DebugConfig &debug_cfg,
+        ze_context_handle_t ctx, ze_device_handle_t dev) {
+    ngen::NEOInterfaceHandler interface = generate_ngen_interface(
+            iface, options, false, body);
+
+#define GPU_HW_CASE(hw) \
+    ir_to_ngen_generator_t<ngen::LevelZeroCodeGenerator<(hw)>> g( \
+            iface, options, debug_cfg); \
+    g.setInterface(std::move(interface)); \
+    convert_ir_to_ngen(body, g); \
+    auto module = g.getModule(ctx, dev); \
+    auto kernel = g.getKernel(module); \
+    return std::make_pair(module, kernel);
 
     GPU_HW_SWITCH(options.hw().ngen_hw());
 #undef GPU_HW_CASE

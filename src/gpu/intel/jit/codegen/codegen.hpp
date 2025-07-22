@@ -24,9 +24,13 @@
 #if DNNL_GPU_RUNTIME == DNNL_RUNTIME_SYCL
 #include <sycl/sycl.hpp>
 #define WITH_SYCL_RUNTIME
-#endif
-#define WITH_OPENCL_RUNTIME
+#elif DNNL_GPU_RUNTIME == DNNL_RUNTIME_OCL
 #include <CL/cl.h>
+#define WITH_OPENCL_RUNTIME
+#elif DNNL_GPU_RUNTIME == DNNL_RUNTIME_L0
+#include "level_zero/ze_api.h"
+#define WITH_L0_RUNTIME
+#endif
 
 namespace dnnl {
 namespace impl {
@@ -43,6 +47,12 @@ namespace jit {
 cl_kernel make_kernel(const kernel::iface_t &iface, const stmt_t &body,
         const kernel::options_t &options, const ngen::DebugConfig &debug_cfg,
         cl_context ctx, cl_device_id dev);
+#endif
+#ifdef WITH_L0_RUNTIME
+std::pair<ze_module_handle_t, ze_kernel_handle_t> make_kernel(
+        const kernel::iface_t &iface, const stmt_t &body,
+        const kernel::options_t &options, const ngen::DebugConfig &debug_cfg,
+        ze_context_handle_t ctx, ze_device_handle_t dev);
 #endif
 
 } // namespace jit

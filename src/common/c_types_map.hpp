@@ -1953,6 +1953,7 @@ enum runtime_kind_t {
     dnnl_runtime_threadpool,
     dnnl_runtime_ocl,
     dnnl_runtime_sycl,
+    dnnl_runtime_l0,
 };
 
 namespace runtime_kind {
@@ -1963,6 +1964,7 @@ const runtime_kind_t tbb = dnnl_runtime_tbb;
 const runtime_kind_t threadpool = dnnl_runtime_threadpool;
 const runtime_kind_t ocl = dnnl_runtime_ocl;
 const runtime_kind_t sycl = dnnl_runtime_sycl;
+const runtime_kind_t l0 = dnnl_runtime_l0;
 } // namespace runtime_kind
 
 using primitive_kind_t = dnnl_primitive_kind_t;
