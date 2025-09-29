@@ -499,14 +499,15 @@ inline int measure_perf_individual(timer::timer_t &t, dnnl_stream_t stream,
         perf_function_t &perf_func, std::vector<dnnl_exec_arg_t> &dnnl_args) {
     cold_cache_t cold_cache(dnnl_args, stream);
 
-    t.reset();
+    t.restart();
     while (true) {
         if (!cold_cache.update_dnnl_args(dnnl_args)) break;
         t.start();
         DNN_SAFE(perf_func(stream, dnnl_args), WARN);
-        t.stamp();
+        t.stop();
         if (should_stop(t)) break;
     }
+    t.finalize_results();
     return OK;
 }
 
@@ -537,7 +538,7 @@ inline int measure_perf_aggregate(timer::timer_t &t,
     int cur_batch_times
             = fix_times_per_prb ? fix_times_per_prb : min_times_per_prb;
 
-    t.reset();
+    t.restart();
     while (true) {
         // Keep separate var due to a `break` inside the loop.
         int execute_count = 0;
@@ -576,10 +577,10 @@ inline int measure_perf_aggregate(timer::timer_t &t,
 
             for_(size_t j = 0; j < v_stream.size(); j++)
             for (size_t i = 0; i < v_nsecs[j].size(); i++) {
-                t.stop(1, (int64_t)v_cycles[j][i], v_nsecs[j][i] / 1e6);
+                t.stop(1, v_nsecs[j][i] / 1e6);
             }
         } else {
-            t.stamp(cur_batch_times * num_streams);
+            t.stop(cur_batch_times * num_streams);
         }
 
         // Assumption that for each stream cold_cache acts same.
@@ -587,13 +588,14 @@ inline int measure_perf_aggregate(timer::timer_t &t,
 
         // Adjust cur_batch_times after the first batch run
         if (is_first_loop) {
-            double ms_min = t.ms(timer::timer_t::min);
+            double ms_min = t.ms(timer::timer_t::mode_t::min);
             // Heuristic: try to use ~5 batch runs for the whole benchmark
             int batch_times_heuristic = (ms_min == 0.0)
                     ? INT_MAX
                     : MAX2(1,
-                            (int)((max_ms_per_prb - t.total_ms()) / ms_min
-                                    / 5));
+                            (int)((max_ms_per_prb
+                                          - t.ms(timer::timer_t::mode_t::sum))
+                                    / ms_min / 5));
             cur_batch_times = MIN2(max_batch_times, batch_times_heuristic);
             is_first_loop = false;
         }
@@ -605,6 +607,7 @@ inline int measure_perf_aggregate(timer::timer_t &t,
         }
     }
 
+    t.finalize_results();
     return OK;
 }
 
@@ -1589,6 +1592,17 @@ execution_mode_t str2execution_mode(const char *str) {
     BENCHDNN_PRINT(0, "%s", "Error: execution mode value is not recognized.\n");
     SAFE_V(FAIL);
     return execution_mode_t::direct;
+}
+
+bool should_stop(const timer::timer_t &t) {
+    // Either run specific number of times requested...
+    const bool stop_by_n_times
+            = fix_times_per_prb && t.n_times() >= fix_times_per_prb;
+    // ... or run at least min_times and reach the requested time border.
+    const bool stop_by_ms = !fix_times_per_prb
+            && t.ms(timer_mode_t::sum) >= max_ms_per_prb
+            && t.n_times() >= min_times_per_prb;
+    return stop_by_n_times || stop_by_ms;
 }
 
 static void maybe_print_cpu_engine_error_message() {

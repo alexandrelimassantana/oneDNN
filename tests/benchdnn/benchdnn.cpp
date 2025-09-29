@@ -91,6 +91,7 @@ int main(int argc, char **argv) {
     ++argv;
 
     timer::timer_t total_time;
+    total_time.start();
 
     if (parse_main_help(argv[0])) return 0;
 
@@ -158,7 +159,8 @@ int main(int argc, char **argv) {
         exit(1);
     }
 
-    total_time.stamp();
+    total_time.stop();
+    total_time.finalize_results();
 
     print_impl_names_summary();
     print_impl_names_csv_summary();
@@ -189,32 +191,24 @@ int main(int argc, char **argv) {
             benchdnn_stat.mistrusted, benchdnn_stat.unimplemented,
             benchdnn_stat.invalid_arguments, benchdnn_stat.failed,
             benchdnn_stat.listed);
-    if (has_bench_mode_bit(mode_bit_t::perf)) {
-        const auto &perf_timer
-                = benchdnn_stat.ms.find(timer::names::perf_timer);
-        if (perf_timer != benchdnn_stat.ms.end()) {
-            const auto &perf_timer_stats = perf_timer->second;
-            printf("total perf: min(ms):%g avg(ms):%g\n",
-                    perf_timer_stats[timer::timer_t::min],
-                    perf_timer_stats[timer::timer_t::avg]);
-        }
-    }
 
-    const auto total_s = total_time.sec(timer::timer_t::sum);
+    const auto total_s = total_time.sec(timer_mode_t::sum);
     printf("total: %.2fs;", total_s);
     for (const auto &e : timer::get_global_service_timers()) {
         const auto &supported_mode_bit = std::get<1>(e);
         if (!has_bench_mode_bit(supported_mode_bit)) continue;
 
         const auto &t_name = std::get<2>(e);
-        const auto &t = benchdnn_stat.ms.find(t_name);
-        if (t == benchdnn_stat.ms.end()) continue;
+        const auto it = benchdnn_stat.timers.find(t_name);
+        if (it == benchdnn_stat.timers.end()) continue;
 
-        const auto &stats = t->second;
-        const auto &t_print_name = std::get<0>(e);
-        double s = stats[timer::timer_t::sum];
+        auto &timer = it->second;
+        timer.finalize_results();
+        const auto &timer_print_name = std::get<0>(e);
+        double s = timer.sec(timer_mode_t::sum);
         double r_s_to_total = 100.f * s / total_s;
-        printf(" %s: %.2fs (%.0f%%);", t_print_name.c_str(), s, r_s_to_total);
+        printf(" %s: %.2fs (%.0f%%);", timer_print_name.c_str(), s,
+                r_s_to_total);
     }
     printf("\n");
 

@@ -141,7 +141,7 @@ struct stat_t {
     int unimplemented;
     int invalid_arguments;
     int listed;
-    std::unordered_map<std::string, double[timer::timer_t::mode_t::n_modes]> ms;
+    std::unordered_map<std::string, timer::timer_t> timers;
     // Key is the number of the test, value is the repro string.
     std::map<int, std::string> failed_cases;
     // Key is an impl_name, value is the number of cases.

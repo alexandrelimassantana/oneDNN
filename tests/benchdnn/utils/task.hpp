@@ -55,7 +55,7 @@ struct task_t {
         auto &tct = res_.timer_map.get_timer(timer::names::test_case_timer);
         tct.start();
         SAFE(create_func_(*v_prim_, &prb_, &res_), WARN);
-        tct.stamp();
+        tct.stop();
         return OK;
     }
 
@@ -68,7 +68,7 @@ struct task_t {
         auto &tct = res_.timer_map.get_timer(timer::names::test_case_timer);
         tct.start();
         SAFE(check_func_(*v_prim_, &prb_, &res_), WARN);
-        tct.stamp();
+        tct.stop();
         return OK;
     }
 
@@ -87,7 +87,8 @@ struct task_t {
             BENCHDNN_PRINT(1, "run (just report, no exec): %s\n", prb_.str());
         }
 
-        tct.stamp();
+        tct.stop();
+        tct.finalize_results();
 
         return report();
     }

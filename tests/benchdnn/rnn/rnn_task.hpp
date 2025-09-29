@@ -77,7 +77,7 @@ struct rnn_task_t {
         // A timer for each test case. Starts from `create_func_` and ends at
         // `parse_result`.
         auto &tct = res_.timer_map.get_timer(timer::names::test_case_timer);
-        tct.stamp();
+        tct.stop();
 
         return report();
     }

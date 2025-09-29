@@ -130,13 +130,11 @@ void parse_result(res_t &res, const char *pstr) {
                 + " total:" + std::to_string(res.total) + ")";
     }
 
-    using bt = timer::timer_t;
-
     const auto &tct = res.timer_map.get_timer(timer::names::test_case_timer);
     // Round to integer for nicer input.
     // Use `sum` mode because it consists of two separate parts - creation and
     // execution.
-    const int64_t tct_ms = static_cast<int64_t>(tct.ms(bt::mode_t::sum));
+    const int64_t tct_ms = static_cast<int64_t>(tct.ms(timer_mode_t::sum));
     std::string tct_str = " (" + std::to_string(tct_ms) + " ms)";
 
     // This is the common format of the repro line ([] - for optional entries):
@@ -166,8 +164,7 @@ void parse_result(res_t &res, const char *pstr) {
 
     if (has_bench_mode_bit(mode_bit_t::perf)) {
         const auto &t = res.timer_map.perf_timer();
-        for (int mode = 0; mode < (int)bt::n_modes; ++mode)
-            bs.ms[timer::names::perf_timer][mode] += t.ms((bt::mode_t)mode);
+        bs.timers[timer::names::perf_timer] += t;
     }
 
     for (const auto &e : timer::get_global_service_timers()) {
@@ -176,8 +173,8 @@ void parse_result(res_t &res, const char *pstr) {
 
         const auto &t_name = std::get<2>(e);
         const auto &t = res.timer_map.get_timer(t_name);
-        // Only summary time is populated to the highest level report.
-        bs.ms[t_name][bt::mode_t::sum] += t.sec(bt::mode_t::sum);
+        // Append timer results to upper level limers.
+        bs.timers[t_name] += t;
     }
 
     // Append an impl name into the total stats.

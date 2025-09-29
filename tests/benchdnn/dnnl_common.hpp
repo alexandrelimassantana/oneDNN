@@ -249,14 +249,6 @@ int check_mem_size(const_dnnl_memory_desc_t md, res_t *res);
 int collect_mem_size(check_mem_size_args_t &mem_size_args,
         const_dnnl_primitive_desc_t const_pd, dir_t dir, bool need_skip = true);
 
-inline bool should_stop(const timer::timer_t &t) {
-    const bool stop = false
-            || (fix_times_per_prb && t.times() >= fix_times_per_prb)
-            || (!fix_times_per_prb && t.total_ms() >= max_ms_per_prb
-                    && t.times() >= min_times_per_prb);
-    return stop;
-}
-
 void skip_unimplemented_data_type(
         const std::vector<dnnl_data_type_t> &v_dt, dir_t dir, res_t *res);
 void skip_unimplemented_sum_po(const attr_t &attr, res_t *res,
@@ -690,6 +682,7 @@ extern execution_mode_t execution_mode;
 
 const char *execution_mode2str(execution_mode_t mode);
 execution_mode_t str2execution_mode(const char *str);
+bool should_stop(const timer::timer_t &t);
 
 float reorder_rescale_factor();
 

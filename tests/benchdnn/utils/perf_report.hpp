@@ -1,5 +1,5 @@
 /*******************************************************************************
-* Copyright 2019-2022 Intel Corporation
+* Copyright 2019-2025 Intel Corporation
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -84,10 +84,10 @@ private:
     }
 
     static timer::timer_t::mode_t modifier2mode(char c) {
-        if (c == '-') return timer::timer_t::min;
-        if (c == '0') return timer::timer_t::avg;
-        if (c == '+') return timer::timer_t::max;
-        return timer::timer_t::min;
+        if (c == '-') return timer::timer_t::mode_t::min;
+        if (c == '0') return timer::timer_t::mode_t::avg;
+        if (c == '+') return timer::timer_t::mode_t::max;
+        return timer::timer_t::mode_t::min;
     }
 
     static double modifier2unit(char c) {
