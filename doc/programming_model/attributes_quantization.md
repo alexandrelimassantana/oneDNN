@@ -116,7 +116,7 @@ using [eltwise](@ref dev_guide_attributes_post_ops_eltwise),
 [binary](@ref dev_guide_attributes_post_ops_binary), or the scale parameter
 of the appropriate post-operation.
 
-## Scaling and Zero-Point APIs and Patterns
+## Quantization APIs: Scaling, Zero-Points, and Precomputed Reductions
 
 The library API supports both int8 and f8 quantization models described above.
 The API was designed to be flexible enough to accommodate different
@@ -133,6 +133,10 @@ oneDNN memory objects.
 For f8 quantization, the supported data types are
 #dnnl::memory::data_type::f8_e5m2 and #dnnl::memory::data_type::f8_e4m3.
 Only scaling factors are supported.
+
+Additionally, oneDNN provides precomputed reductions - special
+optimization for scenarios with grouped weight zero-points that can
+improve performance for Large Language Models.
 
 The library essentially extends the ability of the primitives to scale the
 output before storing the result to the memory with the destination data type.
@@ -419,7 +423,7 @@ See also @ref inference_int8_matmul_cpp and @ref weights_decompression_matmul_cp
 for complete implementations.
 
 @anchor host-side-scalars-and-zero-points
-#### Special Case: Host-side Scalar Scale and Zero-point
+### Special Case: Host-side Scalar Scale and Zero-point
 
 When using the GPU engine, host-side scalar scales and zero-points are
 supported to reduce copying of data from host to device. A memory object
@@ -437,7 +441,55 @@ attr.set_host_zero_point(DNNL_ARG_DST,
            dnnl::memory::data_type::s32);
 ~~~
 
+### Precomputed Reductions
+
+Precomputed reductions optimize performance for Large Language Model (LLM) inference
+when using grouped weight zero-points with dynamic quantization. When weights have
+grouped zero-points, additional reduction operations on the source tensor are required
+during computation. These reductions can be pre-computed externally and provided to
+the primitive, eliminating expensive operations from the critical execution path and
+achieving a speedup for LLM workloads.
+
+The library uses @ref dev_guide_attributes API for setting precomputed reductions.
+The supporting attributes can be found in the documentation for each primitive.
+The unsupported cases are handled according to the
+[attributes error handling section](@ref dev_guide_attributes_error_handling).
+
+#### Available Precomputed Reductions API Method
+
+oneDNN provides the following method for setting precomputed reductions:
+
+~~~cpp
+void dnnl::primitive_attr::set_precomputed_reductions(int arg, int mask,
+        const memory::dims &groups,
+        memory::data_type data_type = memory::data_type::s32);
+~~~
+
+##### Precomputed Reductions Concepts
+
+Argument identifier (`arg`):
+- `DNNL_ARG_SRC`: Source tensor reductions
+
+Mask (`mask`) and Groups (`groups`) follow the same semantics as scaling
+factors and zero-points.
+
+Data Types (`data_type`) supported for precomputed reductions:
+- `s32`
+
+#### Limitations
+
+The following limitations apply when using precomputed reductions:
+
+- **Requires weight zero-points**: Cannot be used without weights zero-points specified
+- **Full matrix mask required**: Must have full A matrix mask (e.g., for standard
+  M×K times K×N MatMul, the mask should be 3), meaning broadcast is not supported
+
+See [Example 3](#example-3-matmul-with-precomputed-reductions-advanced) for complete code.
+
 ## int8 Convolution Quantization Breakdown
+
+This section demonstrates practical application of the quantization APIs
+(scaling factors, zero-points, and per-channel quantization) introduced above.
 
 Consider a convolution with bias. The tensors are represented as:
 
