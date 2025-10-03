@@ -1,7 +1,6 @@
 Quantization {#dev_guide_attributes_quantization}
 =================================================
 
-@anchor dgaq_intro
 ## Introduction
 
 Some primitives support input and output tensors with int8 data types,
@@ -15,8 +14,6 @@ training and inference of large neural networks. Lowering precision to
 
 Related materials:
 - [Lower Numerical Precision Deep Learning Inference and Training](https://www.intel.com/content/dam/develop/external/us/en/documents/lower-numerical-precision-deep-learning-jan2018-754765.pdf)
-- INT8 example with annotations: @ref dev_guide_inference_int8
-- f8 example with annotations: @ref matmul_f8_quantization_cpp
 - [OFP8 standard 8-bit floating-point](https://www.opencompute.org/documents/ocp-8-bit-floating-point-specification-ofp8-revision-1-0-2023-06-20-pdf)
 
 ## Supported Quantization Models
@@ -25,7 +22,7 @@ oneDNN supports integer quantization (int8) and floating-point
 quantization (f8).
 
 @note The guide below does not cover how the appropriate scaling factors can be
-found. Refer to the materials in the [Introduction](@ref dgaq_intro).
+found. For more information, refer to the materials in the [int8 inference guide](@ref dev_guide_inference_int8).
 
 ### int8 Quantization
 
@@ -80,7 +77,7 @@ follows (for details on the API and examples, see the following sections):
     - Provide scaling factors for dequantization from f8 to the computation precision
     as arguments to the execute function.
 
-### Numerical behavior
+### Numerical Behavior
 
 **int8 Quantization Behavior:**
 Primitive implementations may convert int8 inputs to wider data types
@@ -119,242 +116,7 @@ using [eltwise](@ref dev_guide_attributes_post_ops_eltwise),
 [binary](@ref dev_guide_attributes_post_ops_binary), or the scale parameter
 of the appropriate post-operation.
 
-### int8 Convolution Quantization Breakdown
-
-Consider a convolution with bias. The tensors are represented as:
-
-- \f$\src_{f32}[:] = scale_{\src} \cdot (\src_{int8}[:] - zp_{\src})\f$
-- \f$\weights_{f32}[:] = scale_{\weights} \cdot \weights_{int8}[:]\f$
-- \f$\dst_{f32}[:] = scale_{\dst} \cdot (\dst_{int8}[:] - zp_{\dst})\f$
-
-Here the \f$\src_{f32}, \weights_{f32}, \dst_{f32}\f$ are not
-computed at all, the whole work happens with int8 tensors. So the task
-is to compute the \f$\dst_{int8}\f$ tensor, using the \f$\src_{int8}\f$,
-\f$\weights_{int8}\f$ tensors passed at execution time, as well as the
-corresponding quantization parameters \f$scale_{\src}\f$,
-\f$scale_{\weights}\f$, \f$scale_{\dst}\f$, and \f$zp_{\src}\f$,
-\f$zp_{\dst}\f$.
-Mathematically, the computations are:
-
-\f[
-   \dst_{int8}[:] =
-      \operatorname{f32\_to\_int8}(
-         (scale_{\src} \cdot scale_{\weights} \cdot
-         \operatorname{s32\_to\_f32}(conv_{s32}(\src_{int8}, \weights_{int8})
-	   - zp_{\src} \cdot comp_{s32}) + bias_{f32}) / scale_{\dst}
-           + zp_{\dst} )
-\f]
-
-where
-
-- \f$\operatorname{conv}_{s32}\f$ is just a regular convolution which takes
-  source and weights with int8 data type and compute the result in int32 data
-  type (int32 is chosen to avoid overflows during the computations);
-
-- \f$comp_{s32}\f$ is a compensation term to account for
-  \f$\src\f$ non-zero zero-point. This term is computed by the oneDNN
-  library and can typically be pre-computed ahead of time, for example
-  during weights reorder.
-
-- \f$\operatorname{f32\_to\_s8}()\f$ converts an `f32` value to `s8` with
-  potential saturation if the values are out of the range of the int8 data
-  type.
-
-- \f$\operatorname{s32\_to\_f32}()\f$ converts an `int8` value to
-  `f32` with potential rounding. This conversion is typically
-  necessary to apply `f32` scaling factors.
-
-#### Per-Channel Scaling Specifics
-
-Some of the primitives have limited support of multiple scales for a quantized
-tensor. The most popular use case is the @ref dev_guide_convolution primitive
-that supports per-output-channel scaling factors for the weights, meaning that
-the actual convolution computations would need to scale different output
-channels differently. This is possible without significant performance loss
-because the per-output-channel re-quantization is only required at the very end
-of the computations. It seems impossible to implement the same trick for the
-input channels, since that would require re-quantization for every input
-data point.
-
-- \f$\src_{f32}(n, ic, ih, iw) = scale_{\src} \cdot \src_{int8}(n, ic, ih, iw)\f$
-
-- \f$\weights_{f32}(oc, ic, kh, kw) = scale_{\weights}(oc) \cdot
-  \weights_{int8}(oc, ic, kh, kw)\f$
-
-- \f$\dst_{f32}(n, oc, oh, ow) = scale_{\dst} \cdot
-  \dst_{int8}(n, oc, oh, ow)\f$
-
-Note that now the weights' scaling factor depends on \f$oc\f$.
-
-To compute the \f$\dst_{int8}\f$ we need to perform the following:
-
-\f[
-
-    \dst_{int8}(n, oc, oh, ow) =
-        \operatorname{f32\_to\_int8}(
-            \frac{scale_{\src} \cdot scale_{\weights}(oc) \cdot
-            conv_{s32}(\src_{int8}, \weights_{int8})|_{(n, oc, oh, ow)} +
-            \bias_{f32}}{scale_{\dst}}
-        ).
-\f]
-
-The user is responsible for preparing quantized weights accordingly. To do that,
-oneDNN provides reorders that can perform per-channel scaling:
-
-\f[
-
-    \weights_{int8}(oc, ic, kh, kw) =
-        \operatorname{f32\_to\_int8}(
-            \weights_{f32}(oc, ic, kh, kw) / scale_{weights}(oc)
-        ).
-\f]
-
-#### Weights Preparation with Per-output-channel Scaling
-
-The following snippet demonstrates how to prepare quantized weights
-with per-output-channel scaling, reordering from f32 to int8 format.
-
-~~~cpp
-   // weights dimensions
-   const int OC, IC, KH, KW;
-
-   // original f32 weights in plain format
-   dnnl::memory::desc wei_plain_f32_md(
-           {OC, IC, KH, KW},                 // dims
-           dnnl::memory::data_type::f32,     // the data originally in f32
-           dnnl::memory::format_tag::hwigo   // the plain memory format
-           );
-
-   // the scaling factors for quantized weights
-   // An unique scale for each output-channel.
-   std::vector<float> wei_scales(OC) = { /* values */ };
-
-   // optional: zero-points for asymmetric quantization
-   // std::vector<int8_t> wei_zero_points(OC) = { /* values */ };
-
-   // int8 convolution primitive descriptor
-   dnnl::convolution_forward::primitive_desc conv_pd(
-       /* see the next example */);
-
-   // query the convolution weights memory descriptor
-   dnnl::memory::desc wei_conv_s8_md = conv_pd.weights_desc();
-
-   // prepare the attributes for the reorder
-   dnnl::primitive_attr attr;
-   const int quantization_mask = 0
-       | (1 << 0);  // scale per OC dimension, which is the dim #0
-   attr.set_scales_mask(DNNL_ARG_DST, quantization_mask);
-
-   // optional: set zero-points for asymmetric weights quantization
-   // attr.set_zero_points_mask(DNNL_ARG_DST, quantization_mask);
-
-   // create reorder that would perform:
-   //   wei_s8(oc, ic, kh, kw) <- wei_f32(oc, ic, kh, kw) / scale(oc) [- zp(oc)]
-   // including the data format conversion.
-   auto wei_reorder_pd = dnnl::reorder::primitive_desc(
-           wei_plain_f32_md, engine, // source
-           wei_conv_s8_md, engine, // destination,
-           attr);
-   auto wei_reorder = dnnl::reorder(wei_reorder_pd);
-
-// ...
-~~~
-
-##### Complete Convolution Workflow
-
-Building upon the weights preparation shown above, this section shows
-the complete workflow for an int8 convolution that combines per-output-channel
-weight scaling with global source and destination scaling and (optional) zero-points.
-
-~~~cpp
-   const float src_scale; // src_f32[:] = src_scale * (src_s8[:] - src_zp)
-   const int32_t src_zp;  // source zero-point for asymmetric quantization
-   const float dst_scale; // dst_f32[:] = dst_scale * (dst_s8[:] - dst_zp)
-   const int32_t dst_zp;  // destination zero-point
-
-   // the scaling factors for quantized weights (as declared above)
-   // An unique scale for each output-channel.
-   std::vector<float> wei_scales(OC) = {...};
-
-   // optional: per-channel zero-points for weights
-   // (asymmetric weight quantization)
-   // std::vector<int8_t> wei_zero_points(OC) = {...};
-
-   // Src, weights, and dst memory descriptors for convolution,
-   // with memory format tag == any to allow a convolution implementation
-   // to chose the appropriate memory format
-
-   dnnl::memory::desc src_conv_s8_any_md(
-           {BATCH, IC, IH, IW},          // dims
-           dnnl::memory::data_type::s8,  // the data originally in s8
-           dnnl::memory::format_tag::any // let convolution to choose
-           );
-
-   dnnl::memory::desc wei_conv_s8_any_md(
-           {OC, IC, KH, KW},             // dims
-           dnnl::memory::data_type::s8,  // the data originally in s8
-           dnnl::memory::format_tag::any // let convolution to choose
-           );
-
-   dnnl::memory::desc dst_conv_s8_any_md(...);  // ditto
-
-   // prepare the attributes for the convolution
-   dnnl::primitive_attr attr;
-   const int data_mask = 0; // scale and zero-point per tensor for source and destination
-   const int wei_mask = 0
-       | (1 << 0); // scale per OC dimension, which is the dim #0 on weights tensor:
-                   // (   OC, IC, KH, KW)
-                   //      0   1   2   3
-
-   // Configure scaling factors
-   attr.set_scales_mask(DNNL_ARG_SRC, data_mask);
-   attr.set_scales_mask(DNNL_ARG_WEIGHTS, wei_mask);
-   attr.set_scales_mask(DNNL_ARG_DST, data_mask);
-
-   // Configure zero-points for asymmetric quantization
-   attr.set_zero_points_mask(DNNL_ARG_SRC, data_mask);
-       // global source zero-point
-   attr.set_zero_points_mask(DNNL_ARG_DST, data_mask);
-       // global destination zero-point
-   // optional: per-channel weight zero-points
-   // attr.set_zero_points_mask(DNNL_ARG_WEIGHTS, wei_mask);
-
-   // create a convolution primitive descriptor
-   auto conv_pd = dnnl::convolution_forward::primitive_desc(
-           dnnl::prop_kind::forward_inference,
-           dnnl::algorithm::convolution_direct,
-           src_conv_s8_any_md,                     // what's important is that
-           wei_conv_s8_any_md,                     // we specified that we want
-           dst_conv_s8_any_md,                     // computations in s8
-           strides, padding_l, padding_r,
-           dnnl::padding_kind::zero,
-           attr);   // the attributes describe the quantization flow
-
-   // Execute the convolution with runtime quantization parameters
-   auto conv = dnnl::convolution_forward(conv_pd);
-
-   // Create memory objects for quantization parameters
-   auto src_scale_mem = /* create memory with src_scale */;
-   auto src_zp_mem = /* create memory with src_zp */;
-   auto wei_scales_mem = /* create memory with wei_scales */;
-   auto dst_scale_mem = /* create memory with dst_scale */;
-   auto dst_zp_mem = /* create memory with dst_zp */;
-
-   conv.execute(stream, {
-       {DNNL_ARG_SRC, src_memory},
-       {DNNL_ARG_WEIGHTS, wei_memory},
-       {DNNL_ARG_DST, dst_memory},
-       {DNNL_ARG_ATTR_SCALES | DNNL_ARG_SRC, src_scale_mem},
-       {DNNL_ARG_ATTR_SCALES | DNNL_ARG_WEIGHTS, wei_scales_mem},
-       {DNNL_ARG_ATTR_SCALES | DNNL_ARG_DST, dst_scale_mem},
-       {DNNL_ARG_ATTR_ZERO_POINTS | DNNL_ARG_SRC, src_zp_mem},
-       {DNNL_ARG_ATTR_ZERO_POINTS | DNNL_ARG_DST, dst_zp_mem}
-       // optional: {DNNL_ARG_ATTR_ZERO_POINTS | DNNL_ARG_WEIGHTS, wei_zp_mem}
-   });
-// ...
-~~~
-
-## Scaling and Zero-Point API and Usage
+## Scaling and Zero-Point APIs and Patterns
 
 The library API supports both int8 and f8 quantization models described above.
 The API was designed to be flexible enough to accommodate different
@@ -386,7 +148,6 @@ to the destination data type with saturation if required. The rounding happens
 according to the current HW setting (for instance, on CPU according to the
 MXCSR register).
 
-@anchor dev_guide_attributes_quantization_scales
 ### Argument Scaling
 
 The library uses @ref dev_guide_attributes API for setting the scaling factors
@@ -573,7 +334,6 @@ and [3](#example-3-matmul-with-precomputed-reductions-advanced)
 below.
 See also @ref weights_decompression_matmul_cpp for a complete implementation.
 
-@anchor dev_guide_attributes_quantization_zero_points
 ### Argument Zero-Points
 
 Zero-points handle the quantization case where the quantized integer range
@@ -677,15 +437,249 @@ attr.set_host_zero_point(DNNL_ARG_DST,
            dnnl::memory::data_type::s32);
 ~~~
 
+## int8 Convolution Quantization Breakdown
+
+Consider a convolution with bias. The tensors are represented as:
+
+- \f$\src_{f32}[:] = scale_{\src} \cdot (\src_{int8}[:] - zp_{\src})\f$
+- \f$\weights_{f32}[:] = scale_{\weights} \cdot \weights_{int8}[:]\f$
+- \f$\dst_{f32}[:] = scale_{\dst} \cdot (\dst_{int8}[:] - zp_{\dst})\f$
+
+Here the \f$\src_{f32}, \weights_{f32}, \dst_{f32}\f$ are not
+computed at all, the whole work happens with int8 tensors. So the task
+is to compute the \f$\dst_{int8}\f$ tensor, using the \f$\src_{int8}\f$,
+\f$\weights_{int8}\f$ tensors passed at execution time, as well as the
+corresponding quantization parameters \f$scale_{\src}\f$,
+\f$scale_{\weights}\f$, \f$scale_{\dst}\f$, and \f$zp_{\src}\f$,
+\f$zp_{\dst}\f$.
+Mathematically, the computations are:
+
+\f[
+   \dst_{int8}[:] =
+      \operatorname{f32\_to\_int8}(
+         (scale_{\src} \cdot scale_{\weights} \cdot
+         \operatorname{s32\_to\_f32}(conv_{s32}(\src_{int8}, \weights_{int8})
+	   - zp_{\src} \cdot comp_{s32}) + bias_{f32}) / scale_{\dst}
+           + zp_{\dst} )
+\f]
+
+where
+
+- \f$\operatorname{conv}_{s32}\f$ is just a regular convolution which takes
+  source and weights with int8 data type and compute the result in int32 data
+  type (int32 is chosen to avoid overflows during the computations);
+
+- \f$comp_{s32}\f$ is a compensation term to account for
+  \f$\src\f$ non-zero zero-point. This term is computed by the oneDNN
+  library and can typically be pre-computed ahead of time, for example
+  during weights reorder.
+
+- \f$\operatorname{f32\_to\_s8}()\f$ converts an `f32` value to `s8` with
+  potential saturation if the values are out of the range of the int8 data
+  type.
+
+- \f$\operatorname{s32\_to\_f32}()\f$ converts an `int8` value to
+  `f32` with potential rounding. This conversion is typically
+  necessary to apply `f32` scaling factors.
+
+### Per-Channel Scaling Specifics
+
+Some of the primitives have limited support of multiple scales for a quantized
+tensor. The most popular use case is the @ref dev_guide_convolution primitive
+that supports per-output-channel scaling factors for the weights, meaning that
+the actual convolution computations would need to scale different output
+channels differently. This is possible without significant performance loss
+because the per-output-channel re-quantization is only required at the very end
+of the computations. It seems impossible to implement the same trick for the
+input channels, since that would require re-quantization for every input
+data point.
+
+- \f$\src_{f32}(n, ic, ih, iw) = scale_{\src} \cdot \src_{int8}(n, ic, ih, iw)\f$
+
+- \f$\weights_{f32}(oc, ic, kh, kw) = scale_{\weights}(oc) \cdot
+  \weights_{int8}(oc, ic, kh, kw)\f$
+
+- \f$\dst_{f32}(n, oc, oh, ow) = scale_{\dst} \cdot
+  \dst_{int8}(n, oc, oh, ow)\f$
+
+Note that now the weights' scaling factor depends on \f$oc\f$.
+
+To compute the \f$\dst_{int8}\f$ we need to perform the following:
+
+\f[
+
+    \dst_{int8}(n, oc, oh, ow) =
+        \operatorname{f32\_to\_int8}(
+            \frac{scale_{\src} \cdot scale_{\weights}(oc) \cdot
+            conv_{s32}(\src_{int8}, \weights_{int8})|_{(n, oc, oh, ow)} +
+            \bias_{f32}}{scale_{\dst}}
+        ).
+\f]
+
+The user is responsible for preparing quantized weights accordingly. To do that,
+oneDNN provides reorders that can perform per-channel scaling:
+
+\f[
+
+    \weights_{int8}(oc, ic, kh, kw) =
+        \operatorname{f32\_to\_int8}(
+            \weights_{f32}(oc, ic, kh, kw) / scale_{weights}(oc)
+        ).
+\f]
+
+### Weights Preparation with Per-output-channel Scaling
+
+The following snippet demonstrates how to prepare quantized weights
+with per-output-channel scaling, reordering from f32 to int8 format.
+
+~~~cpp
+   // weights dimensions
+   const int OC, IC, KH, KW;
+
+   // original f32 weights in plain format
+   dnnl::memory::desc wei_plain_f32_md(
+           {OC, IC, KH, KW},                 // dims
+           dnnl::memory::data_type::f32,     // the data originally in f32
+           dnnl::memory::format_tag::hwigo   // the plain memory format
+           );
+
+   // the scaling factors for quantized weights
+   // An unique scale for each output-channel.
+   std::vector<float> wei_scales(OC) = { /* values */ };
+
+   // optional: zero-points for asymmetric quantization
+   // std::vector<int8_t> wei_zero_points(OC) = { /* values */ };
+
+   // int8 convolution primitive descriptor
+   dnnl::convolution_forward::primitive_desc conv_pd(
+       /* see the next example */);
+
+   // query the convolution weights memory descriptor
+   dnnl::memory::desc wei_conv_s8_md = conv_pd.weights_desc();
+
+   // prepare the attributes for the reorder
+   dnnl::primitive_attr attr;
+   const int quantization_mask = 0
+       | (1 << 0);  // scale per OC dimension, which is the dim #0
+   attr.set_scales_mask(DNNL_ARG_DST, quantization_mask);
+
+   // optional: set zero-points for asymmetric weights quantization
+   // attr.set_zero_points_mask(DNNL_ARG_DST, quantization_mask);
+
+   // create reorder that would perform:
+   //   wei_s8(oc, ic, kh, kw) <- wei_f32(oc, ic, kh, kw) / scale(oc) [- zp(oc)]
+   // including the data format conversion.
+   auto wei_reorder_pd = dnnl::reorder::primitive_desc(
+           wei_plain_f32_md, engine, // source
+           wei_conv_s8_md, engine, // destination,
+           attr);
+   auto wei_reorder = dnnl::reorder(wei_reorder_pd);
+
+// ...
+~~~
+
+### Complete Convolution Workflow
+
+Building upon the weights preparation shown above, this section shows
+the complete workflow for an int8 convolution that combines per-output-channel
+weight scaling with global source and destination scaling and (optional) zero-points.
+
+~~~cpp
+   const float src_scale; // src_f32[:] = src_scale * (src_s8[:] - src_zp)
+   const int32_t src_zp;  // source zero-point for asymmetric quantization
+   const float dst_scale; // dst_f32[:] = dst_scale * (dst_s8[:] - dst_zp)
+   const int32_t dst_zp;  // destination zero-point
+
+   // the scaling factors for quantized weights (as declared above)
+   // An unique scale for each output-channel.
+   std::vector<float> wei_scales(OC) = {...};
+
+   // optional: per-channel zero-points for weights
+   // (asymmetric weight quantization)
+   // std::vector<int8_t> wei_zero_points(OC) = {...};
+
+   // Src, weights, and dst memory descriptors for convolution,
+   // with memory format tag == any to allow a convolution implementation
+   // to chose the appropriate memory format
+
+   dnnl::memory::desc src_conv_s8_any_md(
+           {BATCH, IC, IH, IW},          // dims
+           dnnl::memory::data_type::s8,  // the data originally in s8
+           dnnl::memory::format_tag::any // let convolution to choose
+           );
+
+   dnnl::memory::desc wei_conv_s8_any_md(
+           {OC, IC, KH, KW},             // dims
+           dnnl::memory::data_type::s8,  // the data originally in s8
+           dnnl::memory::format_tag::any // let convolution to choose
+           );
+
+   dnnl::memory::desc dst_conv_s8_any_md(...);  // ditto
+
+   // prepare the attributes for the convolution
+   dnnl::primitive_attr attr;
+   const int data_mask = 0; // scale and zero-point per tensor for source and destination
+   const int wei_mask = 0
+       | (1 << 0); // scale per OC dimension, which is the dim #0 on weights tensor:
+                   // (   OC, IC, KH, KW)
+                   //      0   1   2   3
+
+   // Configure scaling factors
+   attr.set_scales_mask(DNNL_ARG_SRC, data_mask);
+   attr.set_scales_mask(DNNL_ARG_WEIGHTS, wei_mask);
+   attr.set_scales_mask(DNNL_ARG_DST, data_mask);
+
+   // Configure zero-points for asymmetric quantization
+   attr.set_zero_points_mask(DNNL_ARG_SRC, data_mask);
+       // global source zero-point
+   attr.set_zero_points_mask(DNNL_ARG_DST, data_mask);
+       // global destination zero-point
+   // optional: per-channel weight zero-points
+   // attr.set_zero_points_mask(DNNL_ARG_WEIGHTS, wei_mask);
+
+   // create a convolution primitive descriptor
+   auto conv_pd = dnnl::convolution_forward::primitive_desc(
+           dnnl::prop_kind::forward_inference,
+           dnnl::algorithm::convolution_direct,
+           src_conv_s8_any_md,                     // what's important is that
+           wei_conv_s8_any_md,                     // we specified that we want
+           dst_conv_s8_any_md,                     // computations in s8
+           strides, padding_l, padding_r,
+           dnnl::padding_kind::zero,
+           attr);   // the attributes describe the quantization flow
+
+   // Execute the convolution with runtime quantization parameters
+   auto conv = dnnl::convolution_forward(conv_pd);
+
+   // Create memory objects for quantization parameters
+   auto src_scale_mem = /* create memory with src_scale */;
+   auto src_zp_mem = /* create memory with src_zp */;
+   auto wei_scales_mem = /* create memory with wei_scales */;
+   auto dst_scale_mem = /* create memory with dst_scale */;
+   auto dst_zp_mem = /* create memory with dst_zp */;
+
+   conv.execute(stream, {
+       {DNNL_ARG_SRC, src_memory},
+       {DNNL_ARG_WEIGHTS, wei_memory},
+       {DNNL_ARG_DST, dst_memory},
+       {DNNL_ARG_ATTR_SCALES | DNNL_ARG_SRC, src_scale_mem},
+       {DNNL_ARG_ATTR_SCALES | DNNL_ARG_WEIGHTS, wei_scales_mem},
+       {DNNL_ARG_ATTR_SCALES | DNNL_ARG_DST, dst_scale_mem},
+       {DNNL_ARG_ATTR_ZERO_POINTS | DNNL_ARG_SRC, src_zp_mem},
+       {DNNL_ARG_ATTR_ZERO_POINTS | DNNL_ARG_DST, dst_zp_mem}
+       // optional: {DNNL_ARG_ATTR_ZERO_POINTS | DNNL_ARG_WEIGHTS, wei_zp_mem}
+   });
+// ...
+~~~
+
 ## Additional Examples
 
-The following examples demonstrate advanced quantization techniques and specialized use cases.
+The examples below demonstrate more advanced quantization techniques and specific use cases.
 
-### Example 1: Asymmetric quantization with zero-points
+### Example 1: Asymmetric Quantization with Zero-Points
 
-This example demonstrates asymmetric quantization using zero-points alongside
-scaling factors for a complete quantization workflow including reorder
-operations.
+This example demonstrates asymmetric quantization using zero-points together with
+scaling factors.
 
 ~~~cpp
    // Quantization parameters
@@ -782,7 +776,7 @@ operations.
 // ...
 ~~~
 
-### Example 2: MatMul with advanced quantization (LLM/WoQ)
+### Example 2: MatMul with Advanced Quantization (LLM/WoQ)
 
 This example describes a process of weights decompression, or
 weights-only-quantization (WoQ), in matmul primitive which may be found when
@@ -830,7 +824,7 @@ per-N quantization.
 // ...
 ~~~
 
-### Example 3: MatMul with precomputed reductions
+### Example 3: MatMul with Precomputed Reductions
 
 This example is a complementary addition to the one above. It describes a
 process of dynamic quantization with weights's tensor asymmetric quantization
@@ -936,7 +930,14 @@ impossible to apply them on-the-fly without potential accuracy loss.
 // ...
 ~~~
 
-### Example 4: f8 MatMul with quantization and scaling
+### Example 4: int8 Inference
+
+Refer to the @ref dev_guide_inference_int8 for a complete guide to int8 inference.
+This page explains the 8-bit quantization, shows how
+to calculate scaling factors from data, provides specific numerical
+examples of the quantization process, and details on oneDNN int8 support.
+
+### Example 5: MatMul with f8 Quantization
 
 @ref matmul_f8_quantization_cpp example demonstrates f8 quantization workflow
 using both f8_e4m3 and f8_e5m2 formats. It shows the complete process from
