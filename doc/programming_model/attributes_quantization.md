@@ -347,9 +347,14 @@ attr.set_scales_mask(DNNL_ARG_SRC, 0);
 // Usage: All elements use same scale
 ~~~
 
-@note For more details on global scaling with a single scale value residing on host,
-use @ref host-side-scalars-and-zero-points "host-side scalar scaling"
+@note For more details on global scaling with a single scale value residing on
+host, use @ref host-side-scalars-and-zero-points "host-side scalar scaling"
 (`set_host_scale`) to avoid device memory transfer overhead.
+
+Global scaling is demonstrated in
+[Examples 2](#example-2-convolution-with-per-output-channel-quantization)
+and [3](#example-3-comprehensive-asymmetric-quantization-with-zero-points)
+below.
 
 ##### Per-Channel Scaling
 
@@ -366,6 +371,12 @@ attr.set_scales(DNNL_ARG_WEIGHTS, 1 << 0, {}, dnnl::memory::data_type::f32,
 // Scales: 64 values (one per output channel)
 // Usage: Each output channel gets its own scaling factor
 ~~~
+
+Per-channel scaling is demonstrated in
+[Examples 1](#example-1-weights-quantization-with-per-output-channel-scaling),
+[2](#example-2-convolution-with-per-output-channel-quantization), and
+[3](#example-3-comprehensive-asymmetric-quantization-with-zero-points) below.
+It's also used in @ref inference_int8_matmul_cpp for weights quantization.
 
 ##### Group-Based Quantization
 
@@ -384,6 +395,12 @@ attr.set_scales(DNNL_ARG_WEIGHTS, (1 << 0) + (1 << 1), groups,
 // Scales: 32 values (one per group)
 // Usage: Each group gets its own scaling factor
 ~~~
+
+Group-based quantization is demonstrated in
+[Examples 4](#example-4-matmul-with-advanced-quantization)
+and [5](#example-5-matmul-with-precomputed-reductions-and-advanced-quantization)
+below.
+See also @ref weights_decompression_matmul_cpp for a complete implementation.
 
 ##### Multi-Dimensional Scaling
 
@@ -404,6 +421,12 @@ attr.set_scales(DNNL_ARG_SRC, (1 << 0) + (1 << 1), {},
 // Scales needed: 8 * 64 = 512 values
 // Usage: Each (batch, channel) combination gets its own scale
 ~~~
+
+Multi-dimensional scaling is demonstrated in
+[Examples 4](#example-4-matmul-with-advanced-quantization)
+and [5](#example-5-matmul-with-precomputed-reductions-and-advanced-quantization)
+below.
+See also @ref weights_decompression_matmul_cpp for a complete implementation.
 
 @anchor dev_guide_attributes_quantization_zero_points
 ### Argument Zero-Points
@@ -481,6 +504,14 @@ std::vector<dnnl::memory::dim_t> groups = {64, 1};
 attr.set_zero_points(DNNL_ARG_WEIGHTS, (1 << 0) + (1 << 1), groups,
                      memory::data_type::s32, false);
 ~~~
+
+Zero-point usage is demonstrated in
+[Examples 2](#example-2-convolution-with-per-output-channel-quantization),
+[3](#example-3-comprehensive-asymmetric-quantization-with-zero-points), and
+[5](#example-5-matmul-with-precomputed-reductions-and-advanced-quantization)
+below.
+See also @ref inference_int8_matmul_cpp and @ref weights_decompression_matmul_cpp
+for complete implementations.
 
 @anchor host-side-scalars-and-zero-points
 #### Special Case: Host-side Scalar Scale and Zero-point
