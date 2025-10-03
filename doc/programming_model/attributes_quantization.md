@@ -35,7 +35,7 @@ The primary int8 quantization model that the library assumes is the following:
 \f]
 
 where \f$scale_{x}\f$ is a *scaling factor* in float format,
-\f$zp_{x}\f$ is the *zero point* in int32 format, and
+\f$zp_{x}\f$ is the *zero-point* in int32 format, and
 \f$[:]\f$ is used to denote elementwise application of the formula
 to the arrays. In order to provide best performance, oneDNN does not
 compute those scaling factors and zero-points as part of primitive
@@ -47,11 +47,11 @@ follows (for details on the API and examples, see the following sections):
 - During primitive descriptor creation:
     - If one or multiple inputs are int8 (signed or not),
       then the primitive will behave as a quantized integer operation.
-    - The dimensionality of the scaling factors and zero-point
-      should be provided using masks and groups (e.g. one scale per tensor, one scale per channel, etc.).
+    - The dimensionality of the scaling factors and zero-points
+      should be provided using masks and groups (e.g. one scaling factor per tensor, one scaling factor per channel, etc.).
 - During primitive execution:
     - The user must provide the actual quantization parameters as arguments to the execute function.
-    Scales are `f32` values, and zero-points are `s32` values.
+    Scaling factors (scales) are `f32` values, and zero-points are `s32` values.
 
 ### f8 Quantization
 
@@ -271,16 +271,16 @@ void dnnl::primitive_attr::set_host_scale(int arg,
 
 ##### Concepts
 
-Arguments (`arg`) specify which primitive input/output to scale:
+Argument identifiers (`arg`) specify which tensor (primitive input/output) to scale:
 - `DNNL_ARG_SRC`: Source tensor
 - `DNNL_ARG_WEIGHTS`: Weight tensor
 - `DNNL_ARG_DST`: Destination tensor
 - `DNNL_ARG_BIAS`: Bias tensor (limited support)
 
 Mask (`mask`) controls which dimensions get individual scaling factors:
-- `0`: Single scale for entire tensor (global scaling)
-- `1 << dim`: Scale varies along dimension `dim`
-- `(1 << dim1) + (1 << dim2)`: Scales vary along multiple dimensions
+- `0`: Single scaling factor for entire tensor (global scaling)
+- `1 << dim`: Scaling factors vary along dimension `dim`
+- `(1 << dim1) + (1 << dim2)`: Scaling factors vary along multiple dimensions
 
 Groups (`groups`) divide dimensions into blocks for block-wise quantization:
 - `{}`: No grouping (default)
@@ -288,17 +288,17 @@ Groups (`groups`) divide dimensions into blocks for block-wise quantization:
 - `{G1, G2, ...}`: Multi-dimensional grouping
 
 The scaling parameters support multiple data types to accommodate
-different quantization workflows and precisions requirements:
+different quantization workflows and precision requirements:
 - `f32`
 - `bf16`, `f16`
 - `f8_e5m2`, `f8_e4m3`
 - `e8m0`
 
-Additionally, scales can be specified as residing on host or device memory
+Additionally, scaling factors can be specified as residing on host or device memory
 (refer to [the section below](@ref host-side-scalars-and-zero-points) for
 more details):
-- `is_on_host = false`: Scale values are in device memory
-- `is_on_host = true`: Scale values are in host memory
+- `is_on_host = false`: Scaling factor values are in device memory
+- `is_on_host = true`: Scaling factor values are in host memory
 
 
 #### Supported Scaling Patterns
@@ -306,20 +306,20 @@ more details):
 oneDNN supports several scaling patterns to support different quantization
 schemes. These patterns apply to both int8 and f8 quantization.
 
-* **Global scaling** (`mask=0`) uses a single scale factor for the entire
+* **Global scaling** (`mask=0`) uses a single scaling factor for the entire
   tensor, making it the simplest approach.
-* **Per-channel scaling** (`mask=1<<dim`) applies different scale factors
+* **Per-channel scaling** (`mask=1<<dim`) applies different scaling factors
   along a specific dimension, commonly used for CNN weights.
 * **Multi-dimensional scaling** (`mask=(1<<dim1)+(1<<dim2)`) provides
-  independent scales along multiple tensor dimensions, useful for complex
+  independent scaling factors along multiple tensor dimensions, useful for complex
   activations where both batch and channel dimensions need separate scaling.
 * **Group-based quantization** subdivides tensor dimensions into smaller
-  blocks with individual scale factors, important for large transformer
+  blocks with individual scaling factors, important for large transformer
   models and advanced quantization techniques.
 
 ##### Global Scaling
 
-In the simplest case, when there is only one common scale the attribute changes
+In the simplest case, when there is only one common scaling factor the attribute changes
 the op behavior from
 \f[
     \dst[:] = Op(...)
@@ -343,11 +343,11 @@ attr.set_host_scale(DNNL_ARG_SRC, dnnl::memory::data_type::f32);
 attr.set_scales_mask(DNNL_ARG_SRC, 0);
 
 // Tensor: [N, C, H, W] = [2, 3, 4, 4]
-// Scales: 1 value
-// Usage: All elements use same scale
+// Scaling factors: 1 value
+// Usage: All elements use same scaling factor
 ~~~
 
-@note For more details on global scaling with a single scale value residing on
+@note For more details on global scaling with a single scaling factor residing on
 host, use @ref host-side-scalars-and-zero-points "host-side scalar scaling"
 (`set_host_scale`) to avoid device memory transfer overhead.
 
@@ -358,17 +358,17 @@ below.
 
 ##### Per-Channel Scaling
 
-Per-channel scaling applies different scale factors along specific tensor
+Per-channel scaling applies different scaling factors along specific tensor
 dimensions. For instance, it is commonly used for CNN weights where each
-output channel has its own scale.
+output channel has its own scaling factor.
 
 ~~~cpp
-// Scale per output channel (dimension 0 of weights)
+// Scaling factor per output channel (dimension 0 of weights)
 attr.set_scales(DNNL_ARG_WEIGHTS, 1 << 0, {}, dnnl::memory::data_type::f32,
                 false /*on device*/);
 
 // Tensor: [OC, IC, H, W] = [64, 128, 3, 3]
-// Scales: 64 values (one per output channel)
+// Scaling factors: 64 values (one per output channel)
 // Usage: Each output channel gets its own scaling factor
 ~~~
 
@@ -381,18 +381,18 @@ It's also used in @ref inference_int8_matmul_cpp for weights quantization.
 ##### Group-Based Quantization
 
 Groups enable block-wise quantization by subdividing tensor dimensions into
-smaller blocks, each with its own scale. This might help balance accuracy
+smaller blocks, each with its own scaling factor. This might help balance accuracy
 and efficiency by providing more granular quantization than global scaling.
 
 ~~~cpp
 // Weight shape: [K, N] = [1024, 512] with groups [32, 1]
-// Creates 32 blocks of size [32, 512] each with its own scale
+// Creates 32 blocks of size [32, 512] each with its own scaling factor
 std::vector<dnnl::memory::dim_t> groups = {32, 1};
 attr.set_scales(DNNL_ARG_WEIGHTS, (1 << 0) + (1 << 1), groups,
                 dnnl::memory::data_type::f32, false);
 
 // Tensor: [K, N] = [1024, 512]
-// Scales: 32 values (one per group)
+// Scaling factors: 32 values (one per group)
 // Usage: Each group gets its own scaling factor
 ~~~
 
@@ -404,22 +404,22 @@ See also @ref weights_decompression_matmul_cpp for a complete implementation.
 
 ##### Multi-Dimensional Scaling
 
-Multi-dimensional scaling applies scales across multiple tensor dimensions
+Multi-dimensional scaling applies scaling factors across multiple tensor dimensions
 simultaneously.
 
-For scales per dimensions \f$d_i\f$, set `mask = `\f$\sum_{d_i} 2^{d_i}\f$.
+For scaling factors per dimensions \f$d_i\f$, set `mask = `\f$\sum_{d_i} 2^{d_i}\f$.
 
-Resulting scale count without groups: \f$\prod_{d_i} D_{d_i}\f$, with groups:
+Resulting scaling factor count without groups: \f$\prod_{d_i} D_{d_i}\f$, with groups:
 \f$\prod_{d_i} G_{d_i}\f$.
 
 ~~~cpp
-// Scale varies along batch and channel dimensions
+// Scaling factors vary along batch and channel dimensions
 attr.set_scales(DNNL_ARG_SRC, (1 << 0) + (1 << 1), {},
                 dnnl::memory::data_type::f32, false);
 
 // Tensor: [N, C, H, W] = [8, 64, 32, 32]
-// Scales needed: 8 * 64 = 512 values
-// Usage: Each (batch, channel) combination gets its own scale
+// Scaling factors needed: 8 * 64 = 512 values
+// Usage: Each (batch, channel) combination gets its own scaling factor
 ~~~
 
 Multi-dimensional scaling is demonstrated in
@@ -460,7 +460,7 @@ void dnnl::primitive_attr::set_host_zero_point(int arg,
 
 ##### Zero-Point Concepts
 
-Arguments (`arg`) specify which primitive input/output to apply zero-points:
+Argument identifiers (`arg`) specify which tensor (primitive input/output) to apply zero-points:
 - `DNNL_ARG_SRC`: Source tensor zero-points
 - `DNNL_ARG_WEIGHTS`: Weight tensor zero-points
 - `DNNL_ARG_DST`: Destination tensor zero-points
@@ -481,7 +481,7 @@ more details):
 
 #### Supported Zero-Point Patterns
 
-Zero-point patterns mirror the scaling patterns described above. The same mask
+Zero-point patterns mirror the scaling factor patterns described above. The same mask
 and groups concepts apply:
 
 - **Global zero-point** (`mask=0`): Single zero-point for entire tensor
