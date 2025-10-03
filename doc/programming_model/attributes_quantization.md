@@ -260,13 +260,13 @@ void dnnl::primitive_attr::set_scales_mask(int arg, int mask);
 
 // Generic method with groups support
 void dnnl::primitive_attr::set_scales(int arg, int mask,
-                                      const memory::dims &groups,
-                                      memory::data_type data_type = memory::data_type::f32,
+                                      const dnnl::memory::dims &groups,
+                                      dnnl::memory::data_type data_type = dnnl::memory::data_type::f32,
                                       bool is_on_host = false);
 
 // Convenience method for single host-side scalar
 void dnnl::primitive_attr::set_host_scale(int arg,
-                                          memory::data_type data_type = memory::data_type::f32);
+                                          dnnl::memory::data_type data_type = dnnl::memory::data_type::f32);
 ~~~
 
 ##### Concepts
@@ -389,7 +389,7 @@ and efficiency by providing more granular quantization than global scaling.
 // Creates 32 blocks of size [32, 512] each with its own scale
 std::vector<dnnl::memory::dim_t> groups = {32, 1};
 attr.set_scales(DNNL_ARG_WEIGHTS, (1 << 0) + (1 << 1), groups,
-                memory::data_type::f32, false);
+                dnnl::memory::data_type::f32, false);
 
 // Tensor: [K, N] = [1024, 512]
 // Scales: 32 values (one per group)
@@ -449,13 +449,13 @@ void dnnl::primitive_attr::set_zero_points_mask(int arg, int mask);
 
 // Generic method with groups support
 void dnnl::primitive_attr::set_zero_points(int arg, int mask,
-                                          const memory::dims &groups,
-                                          memory::data_type data_type = memory::data_type::s32,
+                                          const dnnl::memory::dims &groups,
+                                          dnnl::memory::data_type data_type = dnnl::memory::data_type::s32,
                                           bool is_on_host = false);
 
 // Convenience method for single host-side scalar
 void dnnl::primitive_attr::set_host_zero_point(int arg,
-                                              memory::data_type data_type = memory::data_type::s32);
+                                              dnnl::memory::data_type data_type = dnnl::memory::data_type::s32);
 ~~~
 
 ##### Zero-Point Concepts
@@ -493,16 +493,16 @@ and groups concepts apply:
 
 ~~~cpp
 // Global zero-point
-attr.set_zero_points(DNNL_ARG_SRC, 0, {}, memory::data_type::s32, false);
+attr.set_zero_points(DNNL_ARG_SRC, 0, {}, dnnl::memory::data_type::s32, false);
 
 // Per-channel zero-points
-attr.set_zero_points(DNNL_ARG_WEIGHTS, 1 << 0, {}, memory::data_type::s8,
+attr.set_zero_points(DNNL_ARG_WEIGHTS, 1 << 0, {}, dnnl::memory::data_type::s8,
                      false);
 
 // Group-based zero-points
 std::vector<dnnl::memory::dim_t> groups = {64, 1};
 attr.set_zero_points(DNNL_ARG_WEIGHTS, (1 << 0) + (1 << 1), groups,
-                     memory::data_type::s32, false);
+                     dnnl::memory::data_type::s32, false);
 ~~~
 
 Zero-point usage is demonstrated in
@@ -526,10 +526,10 @@ be set using the following API:
 ~~~cpp
 dnnl::primitive_attr attr;
 attr.set_host_scale(DNNL_ARG_DST,
-           memory::data_type::f32);
+           dnnl::memory::data_type::f32);
 
 attr.set_host_zero_point(DNNL_ARG_DST,
-           memory::data_type::s32);
+           dnnl::memory::data_type::s32);
 ~~~
 
 ## Examples
@@ -810,7 +810,7 @@ per-N quantization.
    // A unique scale for each gK (256 / 128 = 2) times N, total 1024 elements.
    std::vector<half> wei_scales(gK, N) = {...};
 
-   attr.set_scales(DNNL_ARG_WEIGHTS, wei_mask, wei_groups, data_type::f16);
+   attr.set_scales(DNNL_ARG_WEIGHTS, wei_mask, wei_groups, dnnl::memory::data_type::f16);
 
    // Additionally, to instruct the library to perform weights decompression,
    // fpmath mode must be set with a flag set to `true`:
@@ -871,7 +871,7 @@ impossible to apply them on-the-fly without potential accuracy loss.
    std::vector<half> wei_scales(scale_gK, N) = {...};
 
    attr.set_scales(DNNL_ARG_WEIGHTS, wei_mask, wei_scales_groups,
-           data_type::f16);
+           dnnl::memory::data_type::f16);
 
    // Zero-points would have the same mask as grouping applies for them as well.
    // For example, let it use the different size of the group.
@@ -883,12 +883,12 @@ impossible to apply them on-the-fly without potential accuracy loss.
    std::vector<int8_t> wei_zps(zp_gK, N) = {...};
 
    attr.set_zero_points(DNNL_ARG_WEIGHTS, wei_mask, wei_zp_groups,
-           data_type::s8);
+           dnnl::memory::data_type::s8);
 
    // Source tensor with asymmetric quantization (u8 data with zero-point)
    const int src_mask = 0; // global zero-point and scale for source
-   attr.set_scales(DNNL_ARG_SRC, src_mask, {}, data_type::f32);
-   attr.set_zero_points(DNNL_ARG_SRC, src_mask, {}, data_type::s32);
+   attr.set_scales(DNNL_ARG_SRC, src_mask, {}, dnnl::memory::data_type::f32);
+   attr.set_zero_points(DNNL_ARG_SRC, src_mask, {}, dnnl::memory::data_type::s32);
 
    // Now, specify the precomputed reductions.
    // Note that it's specified for source tensor.
