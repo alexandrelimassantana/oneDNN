@@ -82,7 +82,7 @@ status_t ref_inner_product_int8_fwd_t::execute_forward(
 
     auto sum_dt = pd()->attr()->post_ops_.get_sum_dt(dst_d.data_type());
 
-    parallel_nd(MB, OC, [&](dim_t mb, dim_t oc) {
+    parallel_nd(MB, OC, [=](dim_t mb, dim_t oc) {
         int acc = ker(mb, oc);
 
         float d = static_cast<float>(acc);
