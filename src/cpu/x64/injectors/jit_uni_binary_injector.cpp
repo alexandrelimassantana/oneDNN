@@ -631,13 +631,13 @@ void jit_uni_binary_injector_t<isa, Vmm>::compute_vector_range(
                 = (rhs_broadcasting_strategy == broadcasting_strategy_t::scalar)
                 && needs_ternary_input;
 
-        if (is_start_idx
-                || rhs_arg_params_differ(vmm_idx, vmm_idx - 1, rhs_arg_params,
-                        rhs_broadcasting_strategy)
-                || load_addr) {
+        const bool params_differ = rhs_arg_params_differ(vmm_idx, vmm_idx - 1,
+                rhs_arg_params, rhs_broadcasting_strategy);
+        const bool need_new_addr = is_start_idx || params_differ || load_addr;
+        if (need_new_addr) {
             rhs1_arg_addr = prepare_rhs_arg_addr(vmm_idx, rhs_arg_idx, post_op,
-                    rhs_arg_params, rhs_broadcasting_strategy,
-                    is_start_idx || load_addr, false);
+                    rhs_arg_params, rhs_broadcasting_strategy, need_new_addr,
+                    false);
         }
 
         if (vmm_preservation_needed) {

@@ -238,7 +238,7 @@ status_t jit_uni_binary_t::pd_t::init(engine_t *engine) {
                             dst_md_, get_supported_postops_bcast_strategies());
             if (bcast_type == broadcasting_strategy_t::per_w) {
                 const auto rhs_len = rhs_md_wrap.nelems();
-                if (!rhs_len) continue;
+                if (rhs_len <= 0) continue;
 
                 const int vlen = is_superset(conf_.isa, avx512_core)
                         ? cpu_isa_traits_t<avx512_core>::vlen
@@ -246,8 +246,8 @@ status_t jit_uni_binary_t::pd_t::init(engine_t *engine) {
                 const auto rhs_type_size
                         = types::data_type_size(rhs_md_wrap.data_type());
                 const auto simd_w = vlen / rhs_type_size;
-                const auto expanded_len = utils::rnd_up(rhs_len, simd_w) * 2;
-
+                const auto expanded_len
+                        = utils::rnd_up(rhs_len + simd_w, simd_w);
                 expanded_elems_len[i] = expanded_len;
             }
         }
