@@ -93,7 +93,7 @@ status_t simple_resampling_kernel_t::execute(const exec_ctx_t &ctx) const {
         const auto src = CTX_IN_MEM(const char *, DNNL_ARG_SRC);
         auto dst = CTX_OUT_MEM(char *, DNNL_ARG_DST);
 
-        parallel_nd(nsp_outer_, OD, OH, [&](dim_t nsp0, dim_t od, dim_t oh) {
+        parallel_nd(nsp_outer_, OD, OH, [=](dim_t nsp0, dim_t od, dim_t oh) {
             const bool preserve_zero_padding
                     = (nsp0 + 1) % NB_CH == 0 && tail_size_ != 0;
 
@@ -112,7 +112,7 @@ status_t simple_resampling_kernel_t::execute(const exec_ctx_t &ctx) const {
         auto diff_src = CTX_OUT_MEM(char *, DNNL_ARG_DIFF_SRC);
 
         parallel_nd(nsp_outer_, ID, IH, IW,
-                [&](dim_t nsp, dim_t id, dim_t ih, dim_t iw) {
+                [=](dim_t nsp, dim_t id, dim_t ih, dim_t iw) {
                     const dim_t diff_dst_off
                             = nsp * OD * OH * OW * inner_stride_;
                     const dim_t diff_src_off
