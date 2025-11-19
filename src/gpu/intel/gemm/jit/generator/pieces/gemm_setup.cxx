@@ -961,7 +961,6 @@ void Generator<hw>::gemmScaleInputs(const GEMMProblem &problem, const GEMMStrate
 
     state.ra.safeRelease(inputs.ldaq);
     state.ra.safeRelease(inputs.ldbq);
-    //state.ra.safeRelease(inputs.ldcq);
     state.ra.safeRelease(inputs.offsetAq);
     state.ra.safeRelease(inputs.offsetBq);
 }

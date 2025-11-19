@@ -1,5 +1,5 @@
 /*******************************************************************************
-* Copyright 2019-2025 Intel Corporation
+* Copyright 2019 Intel Corporation
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -501,48 +501,24 @@ gen_nocopy_desc_t::select_kernel(compute::gpu_arch_t arch, int stepping,
         problem_.AO.setAlignment(int(types::data_type_size(a_quant.zp_type)));
     if (b_quant.zp_type != data_type::undef)
         problem_.BO.setAlignment(int(types::data_type_size(b_quant.zp_type)));
-    if (!swap_ab) {
-        problem_.asPtrDims = a_quant.scale_ndims;
-        problem_.bsPtrDims = b_quant.scale_ndims;
-        problem_.aqGroupK = a_quant.group_k;
-        problem_.bqGroupK = b_quant.group_k;
-        problem_.aqGroupM = a_quant.group_m;
-        problem_.bqGroupN = b_quant.group_n;
-        if (a_quant.scales_type != data_type::undef) {
-            problem_.Ta_scale
-                    = convert_dnnl_to_kernel_type(a_quant.scales_type);
-            problem_.A_scale.setAlignment(
-                    int(types::data_type_size(a_quant.scales_type)));
-        }
-        if (b_quant.scales_type != data_type::undef) {
-            problem_.Tb_scale
-                    = convert_dnnl_to_kernel_type(b_quant.scales_type);
-            problem_.B_scale.layout = MatrixLayout::N;
-            problem_.B_scale.setAlignment(
-                    int(types::data_type_size(b_quant.scales_type)));
-        }
-    } else {
-        problem_.bsPtrDims = a_quant.scale_ndims;
-        problem_.asPtrDims = b_quant.scale_ndims;
-        problem_.bqGroupK = a_quant.group_k;
-        problem_.aqGroupK = b_quant.group_k;
-        problem_.bqGroupN = a_quant.group_n;
-        problem_.aqGroupM = b_quant.group_n;
-        if (a_quant.scales_type != data_type::undef) {
-            problem_.Tb_scale
-                    = convert_dnnl_to_kernel_type(a_quant.scales_type);
-            problem_.B_scale.setAlignment(
-                    int(types::data_type_size(a_quant.scales_type)));
-        }
-        if (b_quant.scales_type != data_type::undef) {
-            problem_.Ta_scale
-                    = convert_dnnl_to_kernel_type(b_quant.scales_type);
-            problem_.A_scale.layout = MatrixLayout::T;
-            problem_.A_scale.setAlignment(
-                    int(types::data_type_size(b_quant.scales_type)));
-        }
+    problem_.asPtrDims = a_quant.scale_ndims;
+    problem_.bsPtrDims = b_quant.scale_ndims;
+    problem_.aqGroupK = a_quant.group_k;
+    problem_.bqGroupK = b_quant.group_k;
+    problem_.aqGroupM = a_quant.group_m;
+    problem_.bqGroupN = b_quant.group_n;
+    if (a_quant.scales_type != data_type::undef) {
+        problem_.Ta_scale = convert_dnnl_to_kernel_type(a_quant.scales_type);
+        problem_.A_scale.layout = swap_ab ? MatrixLayout::T : MatrixLayout::N;
+        problem_.A_scale.setAlignment(
+                int(types::data_type_size(a_quant.scales_type)));
     }
-
+    if (b_quant.scales_type != data_type::undef) {
+        problem_.Tb_scale = convert_dnnl_to_kernel_type(b_quant.scales_type);
+        problem_.B_scale.layout = swap_ab ? MatrixLayout::T : MatrixLayout::N;
+        problem_.B_scale.setAlignment(
+                int(types::data_type_size(b_quant.scales_type)));
+    }
     if (c_quant.scales_type != data_type::undef) {
         problem_.csPtrDims = c_quant.scale_ndims;
         problem_.cMXScale = c_quant.mx;
