@@ -40,6 +40,7 @@ struct settings_t : public base_settings_t {
     std::vector<dnnl_data_type_t> ddt {dnnl_f32};
     std::vector<std::vector<std::string>> stag {{tag::abx, tag::any}};
     std::vector<std::string> dtag {tag::any};
+    std::vector<vdims_t> strides {vdims_t(STRIDES_SIZE)};
     std::vector<alg_t> alg {alg_t::ADD};
 
     const char *perf_template_csv() const {
@@ -59,9 +60,9 @@ struct settings_t : public base_settings_t {
 struct prb_t : public prb_vdims_t {
     // A ctor with common interface across all drivers.
     prb_t(const settings_t &s)
-        : prb_t(s.prb_vdims, s.sdt[0], s.ddt[0], s.stag[0], s.dtag[0], s.alg[0],
-                s.inplace[0], s.attributes.front(), s.ctx_init[0], s.ctx_exe[0],
-                s.impl_filter) {
+        : prb_t(s.prb_vdims, s.sdt[0], s.ddt[0], s.stag[0], s.dtag[0],
+                s.strides[0], s.alg[0], s.inplace[0], s.attributes.front(),
+                s.ctx_init[0], s.ctx_exe[0], s.impl_filter) {
         SAFE_V(s.has_single_setup() ? OK : FAIL);
     }
 
@@ -85,11 +86,33 @@ struct prb_t : public prb_vdims_t {
         repro = set_repro_line(); // must be last in ctor to collect right info
     }
 
+    prb_t(const prb_vdims_t &prb_vdims,
+            const std::vector<dnnl_data_type_t> &sdt, dnnl_data_type_t ddt,
+            const std::vector<std::string> &stag, const std::string &dtag,
+            const vdims_t &strides, alg_t alg, bool inplace, const attr_t &attr,
+            const thr_ctx_t &ctx_init, const thr_ctx_t &ctx_exe,
+            const impl_filter_t &impl_filter)
+        : prb_vdims_t(prb_vdims)
+        , sdt(sdt)
+        , ddt(ddt)
+        , stag(stag)
+        , dtag(dtag)
+        , strides(strides)
+        , alg(alg)
+        , inplace(inplace)
+        , attr(attr)
+        , ctx_init(ctx_init)
+        , ctx_exe(ctx_exe)
+        , impl_filter(impl_filter) {
+        repro = set_repro_line(); // must be last in ctor to collect right info
+    }
+
     dir_t dir = FLAG_FWD; // Lack of prop_kind, always considered as forward.
     std::vector<dnnl_data_type_t> sdt;
     dnnl_data_type_t ddt;
     std::vector<std::string> stag;
     std::string dtag;
+    vdims_t strides;
     alg_t alg;
     bool inplace;
     attr_t attr;
