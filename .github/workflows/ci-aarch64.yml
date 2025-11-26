@@ -295,9 +295,17 @@ jobs:
           echo "16 threads:"
           python ${{ github.workspace }}/oneDNN/.github/automation/performance/benchdnn_comparison.py base_16.txt new_16.txt
 
-      - name: Check performance test failure
+      - name: Leave PR comment
         if: ${{ steps.performance-test.outputs.pass != 'True' }}
-        run: echo "::warning file=.github/workflows/ci-aarch64.yml,line=1,col=1::${{ steps.performance-test.outputs.message }}"
+        run:
+          gh pr comment $PRNUM --body ${{ steps.performance-test.outputs.message }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          PRNUM: ${{ github.event.pull_request.number }}
+      # - name: Check performance test failure
+      #   if: ${{ steps.performance-test.outputs.pass != 'True' }}
+      #   run: echo "::warning file=.github/workflows/ci-aarch64.yml,line=1,col=1::${{ steps.performance-test.outputs.message }}"
 
   # TODO: Find an elegant way to integrate this build with the rest of the workflow.
   windows:
