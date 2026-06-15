@@ -56,8 +56,8 @@ struct gemm_utils_traits<float> {
         return m;
     }
 
-    // Fixed n = 7 for the mx7 micro-kernel
-    static constexpr dim_t get_n_unroll_factor() { return 7; }
+    // Fixed n = 6 for the mx6 micro-kernel
+    static constexpr dim_t get_n_unroll_factor() { return 6; }
 };
 
 // Sum the m*n values from p_src into p_dst, assuming the two-dimensional
