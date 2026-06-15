@@ -29,12 +29,8 @@
 #include "xbyak_riscv/xbyak_riscv.hpp"
 
 #define DECLARE_CPU_JIT_AUX_FUNCTIONS(gen_name) \
-    const char *name() const override { \
-        return STRINGIFY(gen_name); \
-    } \
-    const char *source_file() const override { \
-        return __FILE__; \
-    }
+    const char *name() const override { return STRINGIFY(gen_name); } \
+    const char *source_file() const override { return __FILE__; }
 
 #define JIT_ASSERT(condition) \
     do { \
