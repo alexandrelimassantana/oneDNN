@@ -63,3 +63,18 @@ register_exe(${TEST_EXE}_sdpa
 list(REMOVE_ITEM TEST_SOURCES ${CMAKE_CURRENT_SOURCE_DIR}/test_sdpa.cpp)
 
 register_exe(${TEST_EXE} "${TEST_SOURCES}" "test" "dnnl_gtest")
+
+# Register rvjit component tests as a separate executable: they link the
+# internal object libraries directly since jit_generator_t needs symbols
+# hidden by -fvisibility=internal in the shared dnnl target.
+if(DNNL_TARGET_ARCH STREQUAL "RV64" AND NOT DNNL_CPU_RUNTIME STREQUAL "NONE")
+    file(GLOB RVJIT_TEST_SOURCES ${CMAKE_CURRENT_SOURCE_DIR}/rv64/test_*.cpp)
+    register_exe(${TEST_EXE}_rvjit
+            "${MAIN_SRC_GTEST};${RVJIT_TEST_SOURCES}"
+            "test" "dnnl_gtest;dnnl_cpu_riscv;dnnl_cpu;dnnl_common")
+
+    # xbyak_riscv's include path is otherwise only PRIVATE on the rv64
+    # object library (src/cpu/rv64/CMakeLists.txt).
+    target_include_directories(${TEST_EXE}_rvjit PRIVATE
+        ${PROJECT_SOURCE_DIR}/third_party/xbyak_riscv)
+endif()
