@@ -18,22 +18,47 @@
 #ifndef CPU_RV64_JIT_RVV_1X1_CONVOLUTION_HPP
 #define CPU_RV64_JIT_RVV_1X1_CONVOLUTION_HPP
 
+#include <cstddef>
+
 #include "common/c_types_map.hpp"
 #include "common/dnnl_thread.hpp"
 #include "common/math_utils.hpp"
 #include "common/memory_tracking.hpp"
 #include "common/primitive.hpp"
+#include "common/type_helpers.hpp"
 #include "common/utils.hpp"
 
 #include "cpu/cpu_convolution_pd.hpp"
 #include "cpu/platform.hpp"
 
-#include "cpu/rv64/jit_rvv_1x1_conv_kernel.hpp"
+#include "cpu/rv64/cpu_isa_traits.hpp"
+#include "cpu/rv64/jit_primitive_conf.hpp"
+#include "cpu/rv64/rvjit/rvjit_matmul.hpp"
+#include "cpu/rv64/rvv_weights_layout.hpp"
 
 namespace dnnl {
 namespace impl {
 namespace cpu {
 namespace rv64 {
+
+// The blocking of a 1x1 convolution over nwc/nhwc/ndhwc data and OC-blocked
+// weights, for `nthreads` threads: rvjit tunes the kernel `desc`, and its
+// `blocks` set the OC block and the spatial chunk
+status_t init_1x1_conv_conf(jit_1x1_conv_conf_t &jcp, rvjit_matmul_desc_t &desc,
+        rvjit_matmul_blocks_t &blocks, const convolution_desc_t &cd,
+        const memory_desc_wrapper &src_d, const memory_desc_wrapper &weights_d,
+        const memory_desc_wrapper &dst_d, int nthreads);
+
+// The arguments of one call of the rvjit kernel: an OC block of the weights
+// against a range of spatial positions, over the whole IC
+struct rvjit_1x1_args_t {
+    const void *wei;
+    const void *src;
+    void *dst;
+    dim_t oc;
+    dim_t os;
+    const void *bias;
+};
 
 struct jit_rvv_1x1_convolution_fwd_t : public primitive_t {
     struct pd_t : public cpu_convolution_fwd_pd_t {
@@ -130,27 +155,26 @@ struct jit_rvv_1x1_convolution_fwd_t : public primitive_t {
                             dst_d.format_kind() == format_kind::any),
                     VERBOSE_UNSUPPORTED_TAG);
 
-            // Init configurations before deciding weights format
-            VDISPATCH_CONV_SC(jit_rvv_1x1_conv_kernel_t::init_conf(jcp_,
-                                      *desc(), src_d, weights_d, dst_d, *attr(),
-                                      dnnl_get_max_threads(), false),
-                    VERBOSE_UNSUPPORTED_FEATURE, "init_conf failed");
+            // The rvjit kernel and its blocks, decided once, before the
+            // weights format they set
+            VDISPATCH_CONV_SC(init_1x1_conv_conf(jcp_, rvjit_desc_,
+                                      rvjit_blocks_, *desc(), src_d, weights_d,
+                                      dst_d, dnnl_get_max_threads()),
+                    VERBOSE_UNSUPPORTED_FEATURE,
+                    "rvjit cannot tune the kernel");
 
-            // Only support wei = (OiwXo/gOiwXo/etc)
-            const auto wei_tag = get_wei_tag();
-            VDISPATCH_CONV(IMPLICATION(weights_d.matches_one_of_tag(wei_tag)
-                                           != wei_tag,
-                                   weights_d.format_kind() == format_kind::any),
-                    VERBOSE_UNSUPPORTED_TAG);
+            // Only support the weights laid out by OC block (init_wei_md)
+            memory_desc_t want_wei_md = weights_md_;
+            VDISPATCH_CONV_SC(
+                    init_wei_md(want_wei_md), VERBOSE_UNSUPPORTED_TAG);
+            if (weights_md_.format_kind == format_kind::any)
+                weights_md_ = want_wei_md;
+            VDISPATCH_CONV(weights_md_ == want_wei_md, VERBOSE_UNSUPPORTED_TAG);
 
             // Set default formats if format_kind == any
-            VDISPATCH_CONV(
-                    set_default_formats_common(dat_tag, wei_tag, dat_tag),
+            VDISPATCH_CONV(set_default_formats_common(
+                                   dat_tag, format_tag::undef, dat_tag),
                     VERBOSE_UNSUPPORTED_TAG);
-
-            auto scratchpad = scratchpad_registry().registrar();
-            jit_rvv_1x1_conv_kernel_t::init_scratchpad(scratchpad, jcp_);
-
             return status::success;
         }
 
@@ -158,6 +182,8 @@ struct jit_rvv_1x1_convolution_fwd_t : public primitive_t {
         // (bf16). Set in init() before any dtype/ISA rejection.
         cpu_isa_t isa_ = v;
         jit_1x1_conv_conf_t jcp_ = utils::zero<decltype(jcp_)>();
+        rvjit_matmul_desc_t rvjit_desc_;
+        rvjit_matmul_blocks_t rvjit_blocks_;
 
     protected:
         bool post_ops_ok() const {
@@ -170,35 +196,23 @@ struct jit_rvv_1x1_convolution_fwd_t : public primitive_t {
             return utils::pick(ndims() - 3, nwc, nhwc, ndhwc);
         }
 
-        inline format_tag_t get_wei_tag() const {
-            using namespace format_tag;
-            // Block index is set by the OC lane count (oc_block), which is
-            // derived from the f32 vector width regardless of input dtype; do
-            // not scale by typesize_in (it mis-picks the tag for bf16/f16).
-            const int vlen
-                    = jcp_.oc_block * static_cast<int>(sizeof(float)) * 8;
-            const int v = get_vlen_implementation_id(vlen);
-            const int n = ndims() - 3;
-            const int g = with_groups() ? 1 : 0;
-            // Pick from a flat 3d array indexed by [blksize, ndims, grouped]
-            // - grouped has two options: false, true;
-            // - ndims has three options: 3d, 4d, or 5d;
-            // - block size has four options: 4, 8, 16, 32;
-            return utils::pick(v * 6 + n * 2 + g, Oiw4o, gOiw4o, Oihw4o,
-                    gOihw4o, Oidhw4o, gOidhw4o, Oiw8o, gOiw8o, Oihw8o, gOihw8o,
-                    Oidhw8o, gOidhw8o, Oiw16o, gOiw16o, Oihw16o, gOihw16o,
-                    Oidhw16o, gOidhw16o, Oiw32o, gOiw32o, Oihw32o, gOihw32o,
-                    Oidhw32o, gOidhw32o);
+        // The weights as g, OC blocks, IC and spatial, the OC lanes of a
+        // block innermost (plain when OC is shorter than one block)
+        status_t init_wei_md(memory_desc_t &md) const {
+            const int oc_dim = with_groups() ? 1 : 0;
+            int order[DNNL_MAX_NDIMS];
+            for (int d = 0; d < md.ndims; ++d)
+                order[d] = d;
+            return init_m_blocked_md(
+                    md, oc_dim, rvjit_blocks_.m_block(), order);
         }
     };
 
     jit_rvv_1x1_convolution_fwd_t(const pd_t *apd) : primitive_t(apd) {}
 
     status_t init(engine_t *engine) override {
-        CHECK(safe_ptr_assign(kernel_,
-                new jit_rvv_1x1_conv_kernel_t(
-                        pd()->jcp_, *pd()->attr(), *pd()->dst_md())));
-        return kernel_->create_kernel();
+        return rvjit_matmul_kernel_create(
+                pd()->rvjit_desc_, pd()->rvjit_blocks_, kernel_);
     }
 
     status_t execute(const exec_ctx_t &ctx) const override {
@@ -214,7 +228,7 @@ private:
 
     const pd_t *pd() const { return (const pd_t *)primitive_t::pd().get(); }
 
-    std::unique_ptr<jit_rvv_1x1_conv_kernel_t> kernel_;
+    std::unique_ptr<rvjit_matmul_kernel_t> kernel_;
 };
 
 } // namespace rv64
