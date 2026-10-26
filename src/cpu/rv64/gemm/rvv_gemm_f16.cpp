@@ -58,7 +58,7 @@ template <bool isTransA>
 void block_ker_f16(const dim_t M, const dim_t N, const dim_t K, const char *A,
         const dim_t lda, const char *B, const dim_t ldb, char *C,
         const dim_t ldc, char *ws, bool do_copy, const rvjit_gemm_strips_t &sc,
-        const float *bias) {
+        const float *bias, const rvjit_gemm_panels_t *panels) {
     rvjit_gemm_args_t args {};
     args.b = B;
     args.n = N;
@@ -69,16 +69,18 @@ void block_ker_f16(const dim_t M, const dim_t N, const dim_t K, const char *A,
         copy_A_f16(isTransA, K, a, lda, w, m);
     };
     sc(args, M, A, lda, 2, isTransA, C, 2, ws, do_copy, bias, false, 1.0f, 0.0f,
-            copy_a);
+            copy_a, panels);
 }
 
 template <bool isTransA>
 void gemm_ithr_f16(const dim_t M, const dim_t N, const dim_t K, const char *A,
         const dim_t lda, const char *B, const dim_t ldb, char *C,
         const dim_t ldc, bool do_copy, char *ws, const rvjit_gemm_strips_t &sc,
-        const float *bias) {
+        const float *bias, const rvjit_gemm_panels_t *panels) {
 
-    constexpr dim_t BM = gemm_traits_t<float, isTransA, false>::BM;
+    // A block of A in panels starts at a panel
+    constexpr dim_t BM_rows = gemm_traits_t<float, isTransA, false>::BM;
+    const dim_t BM = panels ? panels->whole(BM_rows) : BM_rows;
     constexpr dim_t BN = gemm_traits_t<float, isTransA, false>::BN;
 
     if ((M <= 0) || (N <= 0)) return;
@@ -89,11 +91,13 @@ void gemm_ithr_f16(const dim_t M, const dim_t N, const dim_t K, const char *A,
         dim_t mb = nstl::min(M - Bm, BM);
         for (dim_t Bn = 0; Bn < N; Bn += BN) {
             dim_t nb = nstl::min(N - Bn, BN);
-            const char *curA = isTransA ? A + Bm * lda * 2 : A + Bm * 2;
+            const char *curA = panels ? A + panels->offset(Bm, 0) * 2
+                    : isTransA        ? A + Bm * lda * 2
+                                      : A + Bm * 2;
             const char *curB = B + Bn * ldb * 2;
             char *curC = C + (Bm + Bn * ldc) * 2;
             block_ker_f16<isTransA>(mb, nb, K, curA, lda, curB, ldb, curC, ldc,
-                    ws, do_copy, sc, bias ? bias + Bm : nullptr);
+                    ws, do_copy, sc, bias ? bias + Bm : nullptr, panels);
         }
     }
 }
@@ -104,7 +108,7 @@ status_t rvv_gemm_f16(const char *transa_, const char *transb_, const dim_t *M_,
         const dim_t *lda_, const void *B, const dim_t *ldb_, const float *beta_,
         void *C, const dim_t *ldc_, data_type_t dt, char *ws_buffers_in,
         const gemm_partition_t *part, const float *bias,
-        const rvjit_gemm_t *kernel) {
+        const rvjit_gemm_t *kernel, const rvjit_gemm_panels_t *panels) {
 
     if (!(utils::one_of(*transa_, 'n', 'N', 't', 'T')
                 && utils::one_of(*transb_, 'n', 'N')))
@@ -148,7 +152,10 @@ status_t rvv_gemm_f16(const char *transa_, const char *transb_, const dim_t *M_,
     rvjit_gemm_strips_t sc;
     CHECK(sc.init(rvjit_gemm_hp_conf(dt, dt), isTransA, kernel));
 
-    const bool do_copy = sc.packs(NB);
+    // Every thread's rows start at a panel of a packed A
+    assert(IMPLICATION(
+            panels, !isTransA && (nthr_m == 1 || MB % panels->m_block == 0)));
+    const bool do_copy = !panels && sc.packs(NB);
     const size_t ws_elems_per_thr = K * sc.m_block() * 2;
     const size_t ws_size_per_thr = rnd_up(ws_elems_per_thr, PAGE_4K);
 
@@ -184,17 +191,20 @@ status_t rvv_gemm_f16(const char *transa_, const char *transb_, const dim_t *M_,
             const char *A_bytes = static_cast<const char *>(A);
             const char *B_bytes = static_cast<const char *>(B);
             char *C_bytes = static_cast<char *>(C);
-            const char *myA = isTransA ? &A_bytes[m_from * lda * 2]
-                                       : &A_bytes[m_from * 2];
+            const char *myA = panels ? A_bytes + panels->offset(m_from, 0) * 2
+                    : isTransA       ? &A_bytes[m_from * lda * 2]
+                                     : &A_bytes[m_from * 2];
             const char *myB = B_bytes + n_from * ldb * 2;
             char *myC = C_bytes + (m_from + n_from * ldc) * 2;
 
             if (!isTransA) {
                 gemm_ithr_f16<false>(myM, myN, K, myA, lda, myB, ldb, myC, ldc,
-                        do_copy, ws, sc, bias ? bias + m_from : nullptr);
+                        do_copy, ws, sc, bias ? bias + m_from : nullptr,
+                        panels);
             } else {
                 gemm_ithr_f16<true>(myM, myN, K, myA, lda, myB, ldb, myC, ldc,
-                        do_copy, ws, sc, bias ? bias + m_from : nullptr);
+                        do_copy, ws, sc, bias ? bias + m_from : nullptr,
+                        panels);
             }
         }
     });

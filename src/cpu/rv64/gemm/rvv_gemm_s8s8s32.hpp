@@ -71,7 +71,9 @@ namespace rv64 {
 //   - dst_dt == s8   : 1 byte/element  s8 (beta == 0 only)
 //   - dst_dt == u8   : 1 byte/element  u8 (beta == 0 only)
 // ws_buffers holds int8 elements (one per-thread A-copy cache). Pass nullptr
-// for either to fall back to malloc/free inside the function.
+// for either to fall back to malloc/free inside the function. An untransposed
+// A packed into `panels` of the kernel's strip is read in place, the
+// partition's MB being a whole number of panels.
 //
 // `dst_dt` must be one of: data_type::s32, f32, s8, u8, f16, bf16. Callers
 // (matmul primitive) gate f16 on mayiuse(zvfh) and bf16 on mayiuse(zvfbfwma)
@@ -84,7 +86,8 @@ status_t rvv_gemm_s8s8s32(const char *transa, const char *transb,
         int32_t *c_buffers = nullptr, int8_t *ws_buffers = nullptr,
         bool bias_is_scalar = false,
         const gemm_utils::gemm_partition_t *part = nullptr,
-        const gemm_utils::rvjit_gemm_t *kernel = nullptr);
+        const gemm_utils::rvjit_gemm_t *kernel = nullptr,
+        const gemm_utils::rvjit_gemm_panels_t *panels = nullptr);
 
 } // namespace rv64
 } // namespace cpu
