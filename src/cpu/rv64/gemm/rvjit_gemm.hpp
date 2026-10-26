@@ -107,6 +107,23 @@ status_t rvjit_gemm_init(const rvjit_gemm_conf_t &conf, rvjit_gemm_t &g);
 // every later one, for the clients that own none (the global sgemm).
 const rvjit_gemm_t &rvjit_gemm(const rvjit_gemm_conf_t &conf);
 
+// An A packed ahead of time into the panels its strips read: the K rows of
+// each `m_block` rows lie contiguously, `block_stride` elements apart.
+struct rvjit_gemm_panels_t {
+    dim_t m_block = 0;
+    dim_t block_stride = 0;
+
+    // The elements before row `i`, a multiple of `m_block`, and K row `k`
+    dim_t offset(dim_t i, dim_t k) const {
+        return i / m_block * block_stride + k * m_block;
+    }
+
+    // The rows of the whole panels in a block of `rows`, at least one panel
+    dim_t whole(dim_t rows) const {
+        return nstl::max(rows / m_block * m_block, m_block);
+    }
+};
+
 // The kernels of a GEMM call and how it packs its strips of A, a strip being
 // the rows one kernel call computes.
 struct rvjit_gemm_strips_t {
@@ -134,22 +151,28 @@ struct rvjit_gemm_strips_t {
     // (B, N, K, ldb and ldc set). A strip of A (`lda` elements of `a_size`
     // bytes between its K rows, or M rows when `trans_a`) is first packed
     // into `ws` with `copy_a` when `do_copy` holds for a whole strip, or
-    // always under `pack_all`. C elements are `c_size` bytes, and every strip
-    // reads the whole of a scalar bias.
+    // always under `pack_all`. An A in `panels` is read in place instead. C
+    // elements are `c_size` bytes, and every strip reads the whole of a
+    // scalar bias.
     template <typename copy_a_t>
     void operator()(rvjit_gemm_args_t &args, dim_t M, const char *A, dim_t lda,
             dim_t a_size, bool trans_a, char *C, dim_t c_size, char *ws,
             bool do_copy, const float *bias, bool bias_is_scalar, float alpha,
-            float beta, const copy_a_t &copy_a) const {
+            float beta, const copy_a_t &copy_a,
+            const rvjit_gemm_panels_t *panels = nullptr) const {
         const dim_t m_blk = m_block();
+        assert(IMPLICATION(panels, panels->m_block == m_blk && !trans_a));
         for (dim_t i = 0; i < M; i += m_blk) {
             const dim_t tile_m = nstl::min(m_blk, M - i);
-            const char *a = A + (trans_a ? i * lda : i) * a_size;
-            const bool copy = (pack_all || (do_copy && tile_m == m_blk)) && ws;
+            const char *a = panels ? A + panels->offset(i, 0) * a_size
+                                   : A + (trans_a ? i * lda : i) * a_size;
+            const bool copy = !panels
+                    && (pack_all || (do_copy && tile_m == m_blk)) && ws;
             if (copy) copy_a(a, ws, tile_m);
 
             args.a = copy ? ws : a;
-            args.lda = (copy ? tile_m : lda) * a_size;
+            const dim_t a_ld = panels ? m_blk : lda;
+            args.lda = (copy ? tile_m : a_ld) * a_size;
             args.c = C + i * c_size;
             args.m = tile_m;
             args.bias = bias ? (bias_is_scalar ? bias : bias + i) : nullptr;

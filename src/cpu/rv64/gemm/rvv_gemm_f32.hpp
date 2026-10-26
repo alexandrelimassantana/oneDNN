@@ -35,13 +35,16 @@ namespace rv64 {
 // reuses it instead of recomputing from dnnl_get_current_num_threads(), so the
 // per-thread workspace offsets stay consistent with the scratchpad capacity
 // booked at init. Pass nullptr to recompute and malloc (inner_product / conv).
+// An untransposed A packed into `panels` of the kernel's strip is read in
+// place, the partition's MB being a whole number of panels.
 status_t rvv_gemm_f32(const char *transa, const char *transb, const dim_t *M,
         const dim_t *N, const dim_t *K, const float *alpha, const float *A,
         const dim_t *lda, const float *B, const dim_t *ldb, const float *beta,
         float *C, const dim_t *ldc, const float *bias,
         float *c_buffers = nullptr, float *ws_buffers = nullptr,
         const gemm_utils::gemm_partition_t *part = nullptr,
-        const gemm_utils::rvjit_gemm_t *kernel = nullptr);
+        const gemm_utils::rvjit_gemm_t *kernel = nullptr,
+        const gemm_utils::rvjit_gemm_panels_t *panels = nullptr);
 } // namespace rv64
 } // namespace cpu
 } // namespace impl
