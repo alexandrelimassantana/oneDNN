@@ -23,6 +23,7 @@
 #include "common/utils.hpp"
 #include "cpu/matmul/cpu_matmul_pd.hpp"
 #include "cpu/rv64/cpu_isa_traits.hpp"
+#include "cpu/rv64/gemm/rvjit_gemm.hpp"
 #include "cpu/rv64/jit_uni_postops_kernel.hpp"
 
 namespace dnnl {
@@ -171,7 +172,8 @@ struct rvv_matmul_t : public primitive_t {
                     VERBOSE_UNSUPPORTED_BIAS_CFG);
 
             init_gemm_conf(src_mdw, weights_mdw);
-            init_scratchpad();
+            VDISPATCH_MATMUL_SC(init_scratchpad(), VERBOSE_UNSUPPORTED_FEATURE,
+                    "rvjit cannot tune the GEMM kernel");
 
             // Include half-precision output conversion on the int8 path.
             // This field describes the implementation; ISA checks stay above.
@@ -302,9 +304,12 @@ struct rvv_matmul_t : public primitive_t {
         // the full GEMM partition and the parallel batch loop in execute().
         int ws_thr_slices_ = 0;
         size_t ws_slice_bytes_ = 0;
+        // The GEMM kernel the primitive owns: it reads A (the weights)
+        // untransposed, a transposed A being packed into the workspace
+        gemm_utils::rvjit_gemm_conf_t gemm_conf_;
 
     private:
-        void init_scratchpad();
+        status_t init_scratchpad();
     };
 
     rvv_matmul_t(const pd_t *apd) : primitive_t(apd) {}
@@ -317,6 +322,8 @@ private:
 
     // Per-row "bias + post-op chain" kernel (shared gemm post-op epilogue).
     std::shared_ptr<jit_uni_postops_kernel_t> postops_kernel_;
+
+    gemm_utils::rvjit_gemm_t gemm_kernel_;
 };
 
 } // namespace matmul

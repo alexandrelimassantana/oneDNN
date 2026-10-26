@@ -22,7 +22,7 @@
 
 #include "cpu/platform.hpp"
 
-#include "cpu/rv64/gemm/jit_rvv_gemm_f16_kernel.hpp"
+#include "cpu/rv64/gemm/rvjit_gemm.hpp"
 #include "cpu/rv64/gemm/rvv_gemm_f16.hpp"
 #include "cpu/rv64/gemm/rvv_gemm_utils_f32.hpp"
 
@@ -33,9 +33,6 @@ namespace rv64 {
 
 using namespace dnnl::impl::utils;
 using namespace gemm_utils;
-// e16/m2 A rows hold the same number of elements as the f32 kernel's e32/m4
-// rows, so the f32 unroll factors apply unchanged.
-using gemm_f16_traits = gemm_utils::gemm_utils_traits<float>;
 
 namespace {
 
@@ -56,107 +53,29 @@ void copy_A_f16(
     }
 }
 
+// Runs the block one strip of rows at a time
 template <bool isTransA>
 void block_ker_f16(const dim_t M, const dim_t N, const dim_t K, const char *A,
         const dim_t lda, const char *B, const dim_t ldb, char *C,
-        const dim_t ldc, char *ws, bool do_copy, const dim_t m_unroll,
-        const jit_rvv_gemm_f16_kernel_table_t &trans_a_table,
-        const jit_rvv_gemm_f16_kernel_table_t &nontrans_a_table,
+        const dim_t ldc, char *ws, bool do_copy, const rvjit_gemm_strips_t &sc,
         const float *bias) {
-
-    const dim_t n_unroll = gemm_f16_traits::get_n_unroll_factor();
-
-    const dim_t Nu = rnd_dn(N, n_unroll);
-    const dim_t Mu = rnd_dn(M, m_unroll);
-    const dim_t n_tail = N - Nu;
-    const dim_t m_tail = M - Mu;
-
-    auto call_kernel
-            = [&](const jit_rvv_gemm_f16_kernel_table_t &kernel_table,
-                      const void *a, const void *b, void *c, dim_t lda_eff,
-                      dim_t tile_m, dim_t tile_n, const float *bias_col) {
-        jit_rvv_gemm_f16_kernel_t::call_params_t p;
-        p.A = a;
-        p.B = b;
-        p.C = c;
-        p.lda = lda_eff;
-        p.ldb = ldb;
-        p.ldc = ldc;
-        p.K = K;
-        p.m = tile_m;
-        p.bias = bias_col;
-
-        (*kernel_table.kernels[tile_n])(&p);
+    rvjit_gemm_args_t args {};
+    args.b = B;
+    args.n = N;
+    args.k = K;
+    args.ldb = ldb * 2;
+    args.ldc = ldc * 2;
+    const auto copy_a = [&](const char *a, char *w, dim_t m) {
+        copy_A_f16(isTransA, K, a, lda, w, m);
     };
-
-    auto invoke_kernel
-            = [&](const char *a_orig, const void *b, void *c, dim_t tile_m,
-                      dim_t tile_n, dim_t j_col, const float *bias_col) {
-        const void *a_eff;
-        dim_t lda_eff;
-        bool trans_a_eff;
-
-        if (do_copy && tile_m == m_unroll) {
-            if (j_col == 0) {
-                copy_A_f16(isTransA, K, a_orig, lda, ws, m_unroll);
-            }
-            a_eff = ws;
-            lda_eff = m_unroll;
-            trans_a_eff = false;
-        } else {
-            a_eff = a_orig;
-            lda_eff = lda;
-            trans_a_eff = isTransA;
-        }
-
-        const auto &kernel_table
-                = trans_a_eff ? trans_a_table : nontrans_a_table;
-        call_kernel(
-                kernel_table, a_eff, b, c, lda_eff, tile_m, tile_n, bias_col);
-    };
-
-    for (dim_t i = 0; i < Mu; i += m_unroll) {
-        const char *a = isTransA ? &A[i * lda * 2] : &A[i * 2];
-        for (dim_t j = 0; j < Nu; j += n_unroll) {
-            const char *b = &B[j * ldb * 2];
-            invoke_kernel(a, b, &C[(i + j * ldc) * 2], m_unroll, n_unroll, j,
-                    bias ? bias + i : nullptr);
-        }
-
-        if (n_tail > 0) {
-            const char *b = &B[Nu * ldb * 2];
-            invoke_kernel(a, b, &C[(i + Nu * ldc) * 2], m_unroll, n_tail, Nu,
-                    bias ? bias + i : nullptr);
-        }
-    }
-
-    if (m_tail > 0) {
-        const char *a_tail = isTransA ? &A[Mu * lda * 2] : &A[Mu * 2];
-
-        for (dim_t j = 0; j < Nu; j += n_unroll) {
-            const char *b = &B[j * ldb * 2];
-            const auto &kernel_table
-                    = isTransA ? trans_a_table : nontrans_a_table;
-            call_kernel(kernel_table, a_tail, b, &C[(Mu + j * ldc) * 2], lda,
-                    m_tail, n_unroll, bias ? bias + Mu : nullptr);
-        }
-
-        if (n_tail > 0) {
-            const char *b = &B[Nu * ldb * 2];
-            const auto &kernel_table
-                    = isTransA ? trans_a_table : nontrans_a_table;
-            call_kernel(kernel_table, a_tail, b, &C[(Mu + Nu * ldc) * 2], lda,
-                    m_tail, n_tail, bias ? bias + Mu : nullptr);
-        }
-    }
+    sc(args, M, A, lda, 2, isTransA, C, 2, ws, do_copy, bias, false, 1.0f, 0.0f,
+            copy_a);
 }
 
 template <bool isTransA>
 void gemm_ithr_f16(const dim_t M, const dim_t N, const dim_t K, const char *A,
         const dim_t lda, const char *B, const dim_t ldb, char *C,
-        const dim_t ldc, bool do_copy, char *ws, const dim_t m_unroll,
-        const jit_rvv_gemm_f16_kernel_table_t &trans_a_table,
-        const jit_rvv_gemm_f16_kernel_table_t &nontrans_a_table,
+        const dim_t ldc, bool do_copy, char *ws, const rvjit_gemm_strips_t &sc,
         const float *bias) {
 
     constexpr dim_t BM = gemm_traits_t<float, isTransA, false>::BM;
@@ -174,8 +93,7 @@ void gemm_ithr_f16(const dim_t M, const dim_t N, const dim_t K, const char *A,
             const char *curB = B + Bn * ldb * 2;
             char *curC = C + (Bm + Bn * ldc) * 2;
             block_ker_f16<isTransA>(mb, nb, K, curA, lda, curB, ldb, curC, ldc,
-                    ws, do_copy, m_unroll, trans_a_table, nontrans_a_table,
-                    bias ? bias + Bm : nullptr);
+                    ws, do_copy, sc, bias ? bias + Bm : nullptr);
         }
     }
 }
@@ -185,7 +103,8 @@ status_t rvv_gemm_f16(const char *transa_, const char *transb_, const dim_t *M_,
         const dim_t *N_, const dim_t *K_, const float *alpha_, const void *A,
         const dim_t *lda_, const void *B, const dim_t *ldb_, const float *beta_,
         void *C, const dim_t *ldc_, data_type_t dt, char *ws_buffers_in,
-        const gemm_partition_t *part, const float *bias) {
+        const gemm_partition_t *part, const float *bias,
+        const rvjit_gemm_t *kernel) {
 
     if (!(utils::one_of(*transa_, 'n', 'N', 't', 'T')
                 && utils::one_of(*transb_, 'n', 'N')))
@@ -226,9 +145,11 @@ status_t rvv_gemm_f16(const char *transa_, const char *transb_, const dim_t *M_,
     // The K axis is never split: the kernel stores the narrowed result once.
     const int nthr_mn = nthr_m * nthr_n;
 
-    bool do_copy = (NB / gemm_f16_traits::get_n_unroll_factor() > 3);
-    const dim_t m_unroll = gemm_f16_traits::get_m_unroll_factor();
-    const size_t ws_elems_per_thr = K * m_unroll * 2;
+    rvjit_gemm_strips_t sc;
+    CHECK(sc.init(rvjit_gemm_hp_conf(dt, dt), isTransA, kernel));
+
+    const bool do_copy = sc.packs(NB);
+    const size_t ws_elems_per_thr = K * sc.m_block() * 2;
     const size_t ws_size_per_thr = rnd_up(ws_elems_per_thr, PAGE_4K);
 
     // The per-thread A-copy workspace must be booked in the caller's
@@ -236,12 +157,6 @@ status_t rvv_gemm_f16(const char *transa_, const char *transb_, const dim_t *M_,
     // whenever the copy can trigger).
     char *ws_buffers = ws_buffers_in;
     if (do_copy && !ws_buffers) return status::unimplemented;
-
-    const bool has_bias = bias != nullptr;
-    const auto &trans_a_table
-            = get_jit_rvv_gemm_f16_kernel_table(true, dt, has_bias);
-    const auto &nontrans_a_table
-            = get_jit_rvv_gemm_f16_kernel_table(false, dt, has_bias);
 
     auto get_thr_block = [&](dim_t &from, dim_t &to, dim_t &myN, dim_t NB_,
                                  dim_t N_, int ithr) {
@@ -276,12 +191,10 @@ status_t rvv_gemm_f16(const char *transa_, const char *transb_, const dim_t *M_,
 
             if (!isTransA) {
                 gemm_ithr_f16<false>(myM, myN, K, myA, lda, myB, ldb, myC, ldc,
-                        do_copy, ws, m_unroll, trans_a_table, nontrans_a_table,
-                        bias ? bias + m_from : nullptr);
+                        do_copy, ws, sc, bias ? bias + m_from : nullptr);
             } else {
                 gemm_ithr_f16<true>(myM, myN, K, myA, lda, myB, ldb, myC, ldc,
-                        do_copy, ws, m_unroll, trans_a_table, nontrans_a_table,
-                        bias ? bias + m_from : nullptr);
+                        do_copy, ws, sc, bias ? bias + m_from : nullptr);
             }
         }
     });

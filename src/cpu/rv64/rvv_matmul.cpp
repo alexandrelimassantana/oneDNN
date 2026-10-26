@@ -34,10 +34,9 @@ namespace cpu {
 namespace rv64 {
 namespace matmul {
 
-void rvv_matmul_t::pd_t::init_scratchpad() {
+status_t rvv_matmul_t::pd_t::init_scratchpad() {
     using namespace memory_tracking::names;
     using gemm_utils::calc_nthr_nocopy_rvv;
-    using gemm_utils::gemm_utils_traits;
 
     // Size the scratchpad with max_threads at init, then hand this same
     // partition to the GEMM drivers at execute() (via gemm_partition_t) so the
@@ -51,12 +50,38 @@ void rvv_matmul_t::pd_t::init_scratchpad() {
     calc_nthr_nocopy_rvv(gemm_M, gemm_N, K_, max_nthr, &nthr_m_, &nthr_n_,
             &nthr_k_, &MB_, &NB_, &KB_);
 
-    // Pick the path's own m_unroll: f32 and int8 derive the factor
-    // independently; the half-precision kernel loads A at e16/m2, which holds
-    // the same element count as the f32 kernel's e32/m4.
-    m_unroll_ = is_int8_path_ ? gemm_utils_traits<int8_t>::get_m_unroll_factor()
-                              : gemm_utils_traits<float>::get_m_unroll_factor();
-    do_copy_ = (NB_ / gemm_utils_traits<float>::get_n_unroll_factor() > 3);
+    // The kernel the primitive owns, its N and K loops sized to the driver's
+    // blocks: A (the weights) is read untransposed, a transposed A packed
+    const memory_desc_wrapper src_d(src_md());
+    const memory_desc_wrapper wei_d(weights_md());
+    const memory_desc_wrapper dst_d(dst_md());
+    const memory_desc_wrapper bias_d(desc()->bias_desc);
+    const dim_t BN = weights_col_major_ ? 96 : 256;
+    const dim_t BK = 256;
+    const data_type_t dst_dt = dst_d.data_type();
+    gemm_utils::rvjit_gemm_conf_t &c = gemm_conf_;
+    if (is_int8_path_) {
+        const bool bias_is_scalar = !bias_d.is_zero() && bias_d.nelems() == 1;
+        c = gemm_utils::rvjit_gemm_int8_conf(
+                wei_d.data_type(), src_d.data_type(), dst_dt, bias_is_scalar);
+    } else if (is_hp_path_) {
+        c = gemm_utils::rvjit_gemm_hp_conf(src_d.data_type(), dst_dt);
+    } else {
+        c = gemm_utils::rvjit_gemm_f32_conf();
+    }
+    // K is split into blocks only for outputs that accumulate partial sums
+    const bool k_blocked = !is_hp_path_
+            && utils::one_of(dst_dt, data_type::s32, data_type::f32);
+    c.n_bound = nstl::min(gemm_N, BN);
+    c.k_bound = k_blocked ? nstl::min(K_, BK) : K_;
+    rvjit_matmul_blocks_t blocks;
+    CHECK(gemm_utils::rvjit_gemm_tune(c, blocks));
+
+    m_unroll_ = blocks.m_block();
+
+    // Every strip of a transposed A is packed; a plain one when N spans
+    // enough tiles to repay it
+    do_copy_ = weights_col_major_ || NB_ / blocks.n_block() > 3;
 
     const int nthr_mn = nthr_m_ * nthr_n_;
     const int nthr_to_use = nthr_mn * nthr_k_;
@@ -83,8 +108,7 @@ void rvv_matmul_t::pd_t::init_scratchpad() {
             = weights_are_broadcast_ ? 0 : nstl::min(batch_, (dim_t)max_nthr);
     ws_thr_slices_
             = static_cast<int>(nstl::max<dim_t>(nthr_to_use, batch_workers));
-    const bool per_batch_copy
-            = M_ / gemm_utils_traits<float>::get_n_unroll_factor() > 3;
+    const bool per_batch_copy = weights_col_major_ || M_ / blocks.n_block() > 3;
     if (do_copy_ || (batch_workers > 0 && per_batch_copy)) {
         const size_t elem_size = is_int8_path_ ? sizeof(int8_t)
                 : is_hp_path_                  ? 2 // f16/bf16 elements
@@ -94,10 +118,12 @@ void rvv_matmul_t::pd_t::init_scratchpad() {
         scratchpad.template book<char>(
                 key_gemm_tmp_buffer, (size_t)ws_thr_slices_ * ws_slice_bytes_);
     }
+    return status::success;
 }
 
 status_t rvv_matmul_t::init(engine_t *engine) {
     UNUSED(engine);
+    CHECK(gemm_utils::rvjit_gemm_init(pd()->gemm_conf_, gemm_kernel_));
     // Only the f32 dispatch applies the per-row "bias + post-op chain"
     // kernel (it hardcodes an f32 dst); the int8 path fuses bias inside its
     // GEMM kernel and the half-precision path has no bias / post-ops yet.
@@ -282,8 +308,8 @@ status_t rvv_matmul_t::execute(const exec_ctx_t &ctx) const {
                     &N_gemm_all, &g.K_gemm, &alpha, wei_bytes, &g.lda,
                     src_bytes, &g.ldb, &beta, dst_bytes, &g.ldc,
                     /*bias=*/bias, a_signed, b_signed, dst_dt, c_buffer,
-                    reinterpret_cast<int8_t *>(ws_bytes), bias_is_scalar,
-                    &part);
+                    reinterpret_cast<int8_t *>(ws_bytes), bias_is_scalar, &part,
+                    &gemm_kernel_);
             assert(st == status::success || st == status::unimplemented);
             MAYBE_UNUSED(st);
         } else {
@@ -296,7 +322,8 @@ status_t rvv_matmul_t::execute(const exec_ctx_t &ctx) const {
                         src_bytes + b * src_batch_stride_bytes, &g.ldb, &beta,
                         dst_bytes + b * dst_batch_stride_bytes, &g.ldc,
                         /*bias=*/bias, a_signed, b_signed, dst_dt, c_buffer,
-                        reinterpret_cast<int8_t *>(ws), bias_is_scalar, p);
+                        reinterpret_cast<int8_t *>(ws), bias_is_scalar, p,
+                        &gemm_kernel_);
                 assert(st == status::success || st == status::unimplemented);
                 MAYBE_UNUSED(st);
             });
@@ -321,7 +348,7 @@ status_t rvv_matmul_t::execute(const exec_ctx_t &ctx) const {
             status_t st = rvv_gemm_f16(&g.transa, &g.transb, &M_gemm_all,
                     &N_gemm_all, &g.K_gemm, &alpha, wei_bytes, &g.lda,
                     src_bytes, &g.ldb, &beta, dst_bytes, &g.ldc, hp_dt,
-                    ws_bytes, &part, bias);
+                    ws_bytes, &part, bias, &gemm_kernel_);
             assert(st == status::success || st == status::unimplemented);
             MAYBE_UNUSED(st);
         } else {
@@ -333,7 +360,7 @@ status_t rvv_matmul_t::execute(const exec_ctx_t &ctx) const {
                         &g.N_gemm, &g.K_gemm, &alpha, wei_base(b), &g.lda,
                         src_bytes + b * src_batch_stride_bytes, &g.ldb, &beta,
                         dst_bytes + b * dst_batch_stride_bytes, &g.ldc, hp_dt,
-                        ws, p, bias);
+                        ws, p, bias, &gemm_kernel_);
                 assert(st == status::success || st == status::unimplemented);
                 MAYBE_UNUSED(st);
             });
@@ -377,7 +404,7 @@ status_t rvv_matmul_t::execute(const exec_ctx_t &ctx) const {
                 reinterpret_cast<const float *>(wei_bytes), &g.lda, src, &g.ldb,
                 &beta, dst, &g.ldc,
                 /*bias=*/nullptr, c_buffer, reinterpret_cast<float *>(ws_bytes),
-                &part);
+                &part, &gemm_kernel_);
         assert(st == status::success || st == status::unimplemented);
         MAYBE_UNUSED(st);
 
@@ -395,7 +422,7 @@ status_t rvv_matmul_t::execute(const exec_ctx_t &ctx) const {
                             dst_bytes + b * dst_batch_stride_bytes),
                     &g.ldc,
                     /*bias=*/nullptr, c_buffer, reinterpret_cast<float *>(ws),
-                    p);
+                    p, &gemm_kernel_);
             assert(st == status::success || st == status::unimplemented);
             MAYBE_UNUSED(st);
         });

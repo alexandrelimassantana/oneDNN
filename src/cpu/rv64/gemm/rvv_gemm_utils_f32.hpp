@@ -20,11 +20,9 @@
 
 #include "common/c_types_map.hpp"
 
-#include <atomic>
 #include <cstddef>
 
 #include "cpu/rv64/cpu_isa_traits.hpp"
-#include "xbyak_riscv/xbyak_riscv_util.hpp"
 
 namespace dnnl {
 namespace impl {
@@ -32,56 +30,14 @@ namespace cpu {
 namespace rv64 {
 namespace gemm_utils {
 
-extern std::atomic<dim_t> rvv_gemm_f32_m_unroll;
-extern std::atomic<dim_t> rvv_gemm_s8_m_unroll;
-
 template <typename T, bool isTransA, bool isTransB>
 struct gemm_traits_t {};
 
 template <bool isTransA, bool isTransB>
 struct gemm_traits_t<float, isTransA, isTransB> {
-    // m is determined by VLEN at runtime via get_m_unroll_factor()
     static constexpr dim_t BM = 4032;
     static constexpr dim_t BN = isTransA ? 96 : 256;
     static constexpr dim_t BK = isTransB ? 96 : 256;
-};
-
-template <typename T>
-struct gemm_utils_traits;
-
-template <>
-struct gemm_utils_traits<float> {
-    // m = VLEN / 32 * LMUL, where LMUL = 4 for f32
-    // VLEN=128 -> m=16, VLEN=256 -> m=32, VLEN=512 -> m=64
-    static dim_t get_m_unroll_factor() {
-        dim_t m = rvv_gemm_f32_m_unroll.load(std::memory_order_relaxed);
-        if (m == 0) {
-            const uint32_t vlen = Xbyak_riscv::CPU::getInstance().getVlen();
-            m = static_cast<dim_t>(vlen / 32 * 4);
-            rvv_gemm_f32_m_unroll.store(m, std::memory_order_relaxed);
-        }
-        return m;
-    }
-
-    // Fixed n = 6 for the double-buffered mx6 micro-kernel.
-    static constexpr dim_t get_n_unroll_factor() { return 6; }
-};
-
-template <>
-struct gemm_utils_traits<int8_t> {
-    static dim_t get_m_unroll_factor() {
-        dim_t m = rvv_gemm_s8_m_unroll.load(std::memory_order_relaxed);
-        if (m == 0) {
-            const uint32_t vlen = Xbyak_riscv::CPU::getInstance().getVlen();
-            m = static_cast<dim_t>(vlen / 8);
-            rvv_gemm_s8_m_unroll.store(m, std::memory_order_relaxed);
-        }
-        return m;
-    }
-
-    // Fixed n = 6: 6 columns * m4 accumulator = 24 vector registers, leaving
-    // v24-v31 for the K-loop/C-update temporaries.
-    static constexpr dim_t get_n_unroll_factor() { return 6; }
 };
 
 // Sum the m*n values from p_src into p_dst, assuming the two-dimensional
