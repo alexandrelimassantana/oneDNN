@@ -59,7 +59,8 @@ template <bool isTransA, bool isTransB>
 void block_ker(const dim_t M, const dim_t N, const dim_t K, const float *A,
         const dim_t lda, const float *B, const dim_t ldb, float *C,
         const dim_t ldc, const float alpha, const float beta, float *ws,
-        bool do_copy, const float *bias, const rvjit_gemm_strips_t &sc) {
+        bool do_copy, const float *bias, const rvjit_gemm_strips_t &sc,
+        const rvjit_gemm_panels_t *panels) {
     rvjit_gemm_args_t args {};
     args.b = B;
     args.n = N;
@@ -73,16 +74,19 @@ void block_ker(const dim_t M, const dim_t N, const dim_t K, const float *A,
     sc(args, M, reinterpret_cast<const char *>(A), lda, sizeof(float), isTransA,
             reinterpret_cast<char *>(C), sizeof(float),
             reinterpret_cast<char *>(ws), do_copy, bias, false, alpha, beta,
-            copy_a);
+            copy_a, panels);
 }
 
 template <bool isTransA, bool isTransB>
 void gemm_ithr(const dim_t M, const dim_t N, const dim_t K, const float alpha,
         const float *A, const dim_t lda, const float *B, const dim_t ldb,
         const float beta, float *C, const dim_t ldc, bool do_copy, float *ws,
-        const float *bias, const rvjit_gemm_strips_t &sc) {
+        const float *bias, const rvjit_gemm_strips_t &sc,
+        const rvjit_gemm_panels_t *panels) {
 
-    constexpr dim_t BM = gemm_traits_t<float, isTransA, isTransB>::BM;
+    // A block of A in panels starts at a panel
+    constexpr dim_t BM_rows = gemm_traits_t<float, isTransA, isTransB>::BM;
+    const dim_t BM = panels ? panels->whole(BM_rows) : BM_rows;
     constexpr dim_t BN = gemm_traits_t<float, isTransA, isTransB>::BN;
     constexpr dim_t BK = gemm_traits_t<float, isTransA, isTransB>::BK;
 
@@ -115,7 +119,9 @@ void gemm_ithr(const dim_t M, const dim_t N, const dim_t K, const float alpha,
             dim_t mb = nstl::min(M - Bm, BM);
             for (dim_t Bn = 0; Bn < N; Bn += BN) {
                 dim_t nb = nstl::min(N - Bn, BN);
-                curA = isTransA ? A + Bk + Bm * lda : A + Bm + Bk * lda;
+                curA = panels      ? A + panels->offset(Bm, Bk)
+                        : isTransA ? A + Bk + Bm * lda
+                                   : A + Bm + Bk * lda;
                 curB = isTransB ? B + Bn + Bk * ldb : B + Bk + Bn * ldb;
                 curC = C + Bm + Bn * ldc;
 
@@ -123,11 +129,11 @@ void gemm_ithr(const dim_t M, const dim_t N, const dim_t K, const float alpha,
                     const float *bias_block = bias ? bias + Bm : nullptr;
                     block_ker<isTransA, isTransB>(mb, nb, kb, curA, lda, curB,
                             ldb, curC, ldc, alpha, beta, ws, do_copy,
-                            bias_block, sc);
+                            bias_block, sc, panels);
                 } else {
                     block_ker<isTransA, isTransB>(mb, nb, kb, curA, lda, curB,
                             ldb, curC, ldc, alpha, 1.0f, ws, do_copy, nullptr,
-                            sc);
+                            sc, panels);
                 }
             }
         }
@@ -140,7 +146,7 @@ status_t rvv_gemm_f32(const char *transa_, const char *transb_, const dim_t *M_,
         const dim_t *lda_, const float *B, const dim_t *ldb_,
         const float *beta_, float *C, const dim_t *ldc_, const float *bias,
         float *c_buffers_in, float *ws_buffers_in, const gemm_partition_t *part,
-        const rvjit_gemm_t *kernel) {
+        const rvjit_gemm_t *kernel, const rvjit_gemm_panels_t *panels) {
 
     if (!(utils::one_of(*transa_, 'n', 'N', 't', 'T')
                 && utils::one_of(*transb_, 'n', 'N', 't', 'T')))
@@ -182,7 +188,10 @@ status_t rvv_gemm_f32(const char *transa_, const char *transb_, const dim_t *M_,
     rvjit_gemm_strips_t sc;
     CHECK(sc.init(conf, isTransA, kernel));
 
-    bool do_copy = sc.packs(NB);
+    // Every thread's rows start at a panel of a packed A
+    assert(IMPLICATION(
+            panels, !isTransA && (nthr_m == 1 || MB % panels->m_block == 0)));
+    bool do_copy = !panels && sc.packs(NB);
     const int nthr_mn = nthr_m * nthr_n;
     const int nthr_to_use = nthr_mn * nthr_k;
     const size_t ws_elems_per_thr = K * sc.m_block();
@@ -253,8 +262,9 @@ status_t rvv_gemm_f32(const char *transa_, const char *transb_, const dim_t *M_,
                 myBeta = 0.0f;
                 ld = MB;
             }
-            const float *myA = isTransA ? &(A[k_from + m_from * lda])
-                                        : &(A[m_from + k_from * lda]);
+            const float *myA = panels ? A + panels->offset(m_from, k_from)
+                    : isTransA        ? &(A[k_from + m_from * lda])
+                                      : &(A[m_from + k_from * lda]);
             const float *myB = isTransB ? &(B[n_from + k_from * ldb])
                                         : &(B[k_from + n_from * ldb]);
 
@@ -264,18 +274,22 @@ status_t rvv_gemm_f32(const char *transa_, const char *transb_, const dim_t *M_,
             if (!isTransA) {
                 if (!isTransB) {
                     gemm_ithr<false, false>(myM, myN, myK, alpha, myA, lda, myB,
-                            ldb, myBeta, myC, ld, do_copy, ws, myBias, sc);
+                            ldb, myBeta, myC, ld, do_copy, ws, myBias, sc,
+                            panels);
                 } else {
                     gemm_ithr<false, true>(myM, myN, myK, alpha, myA, lda, myB,
-                            ldb, myBeta, myC, ld, do_copy, ws, myBias, sc);
+                            ldb, myBeta, myC, ld, do_copy, ws, myBias, sc,
+                            panels);
                 }
             } else {
                 if (!isTransB) {
                     gemm_ithr<true, false>(myM, myN, myK, alpha, myA, lda, myB,
-                            ldb, myBeta, myC, ld, do_copy, ws, myBias, sc);
+                            ldb, myBeta, myC, ld, do_copy, ws, myBias, sc,
+                            panels);
                 } else {
                     gemm_ithr<true, true>(myM, myN, myK, alpha, myA, lda, myB,
-                            ldb, myBeta, myC, ld, do_copy, ws, myBias, sc);
+                            ldb, myBeta, myC, ld, do_copy, ws, myBias, sc,
+                            panels);
                 }
             }
         }

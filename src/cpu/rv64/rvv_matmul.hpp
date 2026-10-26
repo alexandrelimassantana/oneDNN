@@ -123,6 +123,9 @@ struct rvv_matmul_t : public primitive_t {
             VDISPATCH_MATMUL(attr()->has_default_values(attr_skip_mask, dst_dt),
                     VERBOSE_UNSUPPORTED_ATTR);
 
+            // Weights left to the primitive are laid out once it is tuned
+            wei_any_ = weights_md_.format_kind == format_kind::any;
+
             // Resolve the primary and the post-op binary src1 formats before any
             // layout / post-op check: a post-op binary src1 may be format_any and
             // must be matched against dst before binary_broadcast_ok() inspects
@@ -299,6 +302,11 @@ struct rvv_matmul_t : public primitive_t {
         dim_t KB_ = 0;
         dim_t m_unroll_ = 0;
         bool do_copy_ = false;
+        // Weights of format any, laid out as the panels of the kernel's
+        // strips (`prepacked_`) unless N is shorter than one strip
+        bool wei_any_ = false;
+        bool prepacked_ = false;
+        gemm_utils::rvjit_gemm_panels_t panels_;
         // A-copy workspace booked in the scratchpad: number of per-thread
         // slices (0 = not booked) and the byte size of one slice. Covers both
         // the full GEMM partition and the parallel batch loop in execute().
@@ -310,6 +318,7 @@ struct rvv_matmul_t : public primitive_t {
 
     private:
         status_t init_scratchpad();
+        status_t init_panels();
     };
 
     rvv_matmul_t(const pd_t *apd) : primitive_t(apd) {}

@@ -41,14 +41,17 @@ namespace rv64 {
 // initialization (see gemm_utils::gemm_partition_t); nthr_k is forced to 1.
 // `ws_buffers` holds the per-thread A-copy workspace (char elements) booked
 // in the caller's scratchpad; unimplemented is returned when the A copy is
-// active for the computed partition and no workspace is provided.
+// active for the computed partition and no workspace is provided. An
+// untransposed A packed into `panels` of the kernel's strip is read in place,
+// the partition's MB being a whole number of panels.
 status_t rvv_gemm_f16(const char *transa, const char *transb, const dim_t *M,
         const dim_t *N, const dim_t *K, const float *alpha, const void *A,
         const dim_t *lda, const void *B, const dim_t *ldb, const float *beta,
         void *C, const dim_t *ldc, data_type_t dt, char *ws_buffers = nullptr,
         const gemm_utils::gemm_partition_t *part = nullptr,
         const float *bias = nullptr,
-        const gemm_utils::rvjit_gemm_t *kernel = nullptr);
+        const gemm_utils::rvjit_gemm_t *kernel = nullptr,
+        const gemm_utils::rvjit_gemm_panels_t *panels = nullptr);
 
 } // namespace rv64
 } // namespace cpu

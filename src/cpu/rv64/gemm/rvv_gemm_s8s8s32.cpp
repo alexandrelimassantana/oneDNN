@@ -70,7 +70,7 @@ void block_ker_s8(const dim_t M, const dim_t N, const dim_t K, const char *A,
         const dim_t lda, const void *B, const dim_t ldb, void *C,
         const dim_t ldc, const float alpha, const float beta, int8_t *ws,
         bool do_copy, const float *bias, bool bias_is_scalar, size_t dst_dt_sz,
-        const rvjit_gemm_strips_t &sc) {
+        const rvjit_gemm_strips_t &sc, const rvjit_gemm_panels_t *panels) {
     rvjit_gemm_args_t args {};
     args.b = B;
     args.n = N;
@@ -83,7 +83,7 @@ void block_ker_s8(const dim_t M, const dim_t N, const dim_t K, const char *A,
     // A scalar bias broadcasts over M: every strip reads the same float
     sc(args, M, A, lda, 1, isTransA, static_cast<char *>(C),
             static_cast<dim_t>(dst_dt_sz), reinterpret_cast<char *>(ws),
-            do_copy, bias, bias_is_scalar, alpha, beta, copy_a);
+            do_copy, bias, bias_is_scalar, alpha, beta, copy_a, panels);
 }
 
 template <bool isTransA, bool isTransB>
@@ -91,9 +91,12 @@ void gemm_ithr_s8(const dim_t M, const dim_t N, const dim_t K,
         const float alpha, const char *A, const dim_t lda, const void *B,
         const dim_t ldb, const float beta, void *C, const dim_t ldc,
         bool do_copy, int8_t *ws, const float *bias, bool bias_is_scalar,
-        data_type_t dst_dt, size_t dst_dt_sz, const rvjit_gemm_strips_t &sc) {
+        data_type_t dst_dt, size_t dst_dt_sz, const rvjit_gemm_strips_t &sc,
+        const rvjit_gemm_panels_t *panels) {
 
-    constexpr dim_t BM = gemm_traits_t<float, isTransA, isTransB>::BM;
+    // A block of A in panels starts at a panel
+    constexpr dim_t BM_rows = gemm_traits_t<float, isTransA, isTransB>::BM;
+    const dim_t BM = panels ? panels->whole(BM_rows) : BM_rows;
     constexpr dim_t BN = gemm_traits_t<float, isTransA, isTransB>::BN;
 
     const dim_t BK_eff = dst_is_overwrite_only(dst_dt)
@@ -166,7 +169,9 @@ void gemm_ithr_s8(const dim_t M, const dim_t N, const dim_t K,
             dim_t mb = nstl::min(M - Bm, BM);
             for (dim_t Bn = 0; Bn < N; Bn += BN) {
                 dim_t nb = nstl::min(N - Bn, BN);
-                curA = isTransA ? A + Bk + Bm * lda : A + Bm + Bk * lda;
+                curA = panels      ? A + panels->offset(Bm, Bk)
+                        : isTransA ? A + Bk + Bm * lda
+                                   : A + Bm + Bk * lda;
                 const char *B_bytes = static_cast<const char *>(B);
                 curB = isTransB
                         ? static_cast<const void *>(B_bytes + Bn + Bk * ldb)
@@ -179,11 +184,11 @@ void gemm_ithr_s8(const dim_t M, const dim_t N, const dim_t K,
                             : nullptr;
                     block_ker_s8<isTransA, isTransB>(mb, nb, kb, curA, lda,
                             curB, ldb, curC, ldc, alpha, beta, ws, do_copy,
-                            bias_block, bias_is_scalar, dst_dt_sz, sc);
+                            bias_block, bias_is_scalar, dst_dt_sz, sc, panels);
                 } else {
                     block_ker_s8<isTransA, isTransB>(mb, nb, kb, curA, lda,
                             curB, ldb, curC, ldc, alpha, 1.0f, ws, do_copy,
-                            nullptr, bias_is_scalar, dst_dt_sz, sc);
+                            nullptr, bias_is_scalar, dst_dt_sz, sc, panels);
                 }
             }
         }
@@ -197,7 +202,8 @@ status_t rvv_gemm_s8s8s32(const char *transa_, const char *transb_,
         const float *beta_, void *C, const dim_t *ldc_, const float *bias,
         bool a_signed, bool b_signed, data_type_t dst_dt, int32_t *c_buffers_in,
         int8_t *ws_buffers_in, bool bias_is_scalar,
-        const gemm_partition_t *part, const rvjit_gemm_t *kernel) {
+        const gemm_partition_t *part, const rvjit_gemm_t *kernel,
+        const rvjit_gemm_panels_t *panels) {
 
     if (!(utils::one_of(*transa_, 'n', 'N', 't', 'T')
                 && utils::one_of(*transb_, 'n', 'N', 't', 'T')))
@@ -260,7 +266,10 @@ status_t rvv_gemm_s8s8s32(const char *transa_, const char *transb_,
     rvjit_gemm_strips_t sc;
     CHECK(sc.init(conf, isTransA, kernel));
 
-    bool do_copy = sc.packs(NB);
+    // Every thread's rows start at a panel of a packed A
+    assert(IMPLICATION(
+            panels, !isTransA && (nthr_m == 1 || MB % panels->m_block == 0)));
+    bool do_copy = !panels && sc.packs(NB);
     const int nthr_mn = nthr_m * nthr_n;
     const size_t ws_elems_per_thr = K * sc.m_block();
     const size_t ws_size_per_thr
@@ -345,8 +354,9 @@ status_t rvv_gemm_s8s8s32(const char *transa_, const char *transb_,
                 ld = MB;
             }
             const char *A_bytes = static_cast<const char *>(A);
-            const char *myA = isTransA ? &A_bytes[k_from + m_from * lda]
-                                       : &A_bytes[m_from + k_from * lda];
+            const char *myA = panels ? A_bytes + panels->offset(m_from, k_from)
+                    : isTransA       ? &A_bytes[k_from + m_from * lda]
+                                     : &A_bytes[m_from + k_from * lda];
             const char *B_bytes = static_cast<const char *>(B);
             const void *myB = isTransB
                     ? static_cast<const void *>(B_bytes + n_from + k_from * ldb)
@@ -361,21 +371,21 @@ status_t rvv_gemm_s8s8s32(const char *transa_, const char *transb_,
                 if (!isTransB) {
                     gemm_ithr_s8<false, false>(myM, myN, myK, alpha, myA, lda,
                             myB, ldb, myBeta, myC, ld, do_copy, ws, myBias,
-                            bias_is_scalar, dst_dt, dst_dt_sz, sc);
+                            bias_is_scalar, dst_dt, dst_dt_sz, sc, panels);
                 } else {
                     gemm_ithr_s8<false, true>(myM, myN, myK, alpha, myA, lda,
                             myB, ldb, myBeta, myC, ld, do_copy, ws, myBias,
-                            bias_is_scalar, dst_dt, dst_dt_sz, sc);
+                            bias_is_scalar, dst_dt, dst_dt_sz, sc, panels);
                 }
             } else {
                 if (!isTransB) {
                     gemm_ithr_s8<true, false>(myM, myN, myK, alpha, myA, lda,
                             myB, ldb, myBeta, myC, ld, do_copy, ws, myBias,
-                            bias_is_scalar, dst_dt, dst_dt_sz, sc);
+                            bias_is_scalar, dst_dt, dst_dt_sz, sc, panels);
                 } else {
                     gemm_ithr_s8<true, true>(myM, myN, myK, alpha, myA, lda,
                             myB, ldb, myBeta, myC, ld, do_copy, ws, myBias,
-                            bias_is_scalar, dst_dt, dst_dt_sz, sc);
+                            bias_is_scalar, dst_dt, dst_dt_sz, sc, panels);
                 }
             }
         }
