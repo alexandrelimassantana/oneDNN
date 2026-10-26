@@ -19,6 +19,7 @@
 
 #include "common/c_types_map.hpp"
 
+#include "cpu/rv64/gemm/rvjit_gemm.hpp"
 #include "cpu/rv64/gemm/rvv_gemm_utils_f32.hpp"
 
 namespace dnnl {
@@ -46,7 +47,8 @@ status_t rvv_gemm_f16(const char *transa, const char *transb, const dim_t *M,
         const dim_t *lda, const void *B, const dim_t *ldb, const float *beta,
         void *C, const dim_t *ldc, data_type_t dt, char *ws_buffers = nullptr,
         const gemm_utils::gemm_partition_t *part = nullptr,
-        const float *bias = nullptr);
+        const float *bias = nullptr,
+        const gemm_utils::rvjit_gemm_t *kernel = nullptr);
 
 } // namespace rv64
 } // namespace cpu
