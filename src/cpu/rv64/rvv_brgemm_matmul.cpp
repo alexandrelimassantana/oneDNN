@@ -30,6 +30,7 @@
 #include "cpu/platform.hpp"
 #include "cpu/rv64/jit_generator.hpp"
 #include "cpu/rv64/rvv_brgemm_matmul.hpp"
+#include "cpu/rv64/rvv_weights_layout.hpp"
 
 namespace dnnl {
 namespace impl {
@@ -264,6 +265,7 @@ status_t rvv_brgemm_matmul_t::pd_t::init(const engine_t *engine) {
     // Resolve primary + post-op binary src1 formats before the post-op check:
     // a post-op binary src1 may be format_any and must be matched to dst before
     // binary_broadcast_ok() inspects its layout (matches x64).
+    const bool wei_any = weights_md_.format_kind == format_kind::any;
     VDISPATCH_MATMUL(set_default_formats(), VERBOSE_UNSUPPORTED_TAG);
     VDISPATCH_MATMUL(attr_.set_default_formats(dst_md(0)) == status::success,
             VERBOSE_UNSUPPORTED_POSTOP);
@@ -377,7 +379,33 @@ status_t rvv_brgemm_matmul_t::pd_t::init(const engine_t *engine) {
     brgemm_desc_t brg_desc;
     CHECK(brgemm_desc_init(&brg_desc, brg_isa, brgemm_strd, src_dt, wei_dt,
             brgemm_col_major, 1.0f, 0.0f, 0, LDB, LDC, M_brg, N_brg, K_brg));
-    brg_desc.LDA = brg_desc.bd_block; // packed stride (not N)
+
+    // Weights left to the primitive are laid out by the kernel's M tile
+    // (row-major when N is shorter than one tile), which it reads in place;
+    // int8 weights are packed, which widens them to s32
+    const int wei_m_dim = wei_ndims - 1;
+    const int wei_k_dim = wei_ndims - 2;
+    if (wei_any && !in_dt_ok_int8) {
+        int order[DNNL_MAX_NDIMS];
+        for (int d = 0; d < wei_ndims - 2; ++d)
+            order[d] = d;
+        order[wei_ndims - 2] = wei_m_dim;
+        order[wei_ndims - 1] = wei_k_dim;
+        CHECK(init_m_blocked_md(
+                weights_md_, wei_m_dim, brg_desc.bd_block, order));
+    }
+    dim_t lda = 0, block_stride = 0;
+    const bool in_place = !in_dt_ok_int8
+            && m_blocked_strides(memory_desc_wrapper(weights_md(0)), wei_m_dim,
+                    wei_k_dim, brg_desc.bd_block, lda, block_stride)
+            && (lda == brg_desc.bd_block || brg_desc.bdb == 0);
+    pack_a_ = !in_place;
+    if (pack_a_) {
+        brg_desc.LDA = brg_desc.bd_block; // packed stride (not N)
+    } else {
+        brg_desc.LDA = lda;
+        brg_desc.stride_a_m_block = block_stride;
+    }
 
     brgemm_kernel_t *kernel = nullptr;
     CHECK(brgemm_kernel_create(&kernel, brg_desc));
@@ -385,7 +413,7 @@ status_t rvv_brgemm_matmul_t::pd_t::init(const engine_t *engine) {
 
     // pack_a_tile is dtype-aware; the bias+postops chain touches the dst and
     // is only built for the non-int8 path (int8 has no bias/postops yet).
-    pack_kernel_.reset(new jit_pack_a_tile_t(input_typesize_));
+    if (pack_a_) pack_kernel_.reset(new jit_pack_a_tile_t(input_typesize_));
     if (!in_dt_ok_int8) {
         const memory_desc_wrapper bias_d(desc()->bias_desc);
         jit_uni_postops_kernel_t::conf_t conf;
@@ -408,6 +436,7 @@ status_t rvv_brgemm_matmul_t::pd_t::init(const engine_t *engine) {
 void rvv_brgemm_matmul_t::pd_t::init_scratchpad() {
     using namespace memory_tracking::names;
     const auto &brg = brg_kernel_->get_brg();
+    if (!pack_a_) return;
     auto scratchpad = scratchpad_registry().registrar();
     // int8 A is pre-widened to s32 during packing (4 bytes/elem).
     const int ws_typesize = (input_typesize_ == 1) ? 4 : input_typesize_;
@@ -443,8 +472,11 @@ status_t rvv_brgemm_matmul_t::execute(const exec_ctx_t &ctx) const {
     // brgemm kernel is called per K-block with offset into the buffer.
     const dim_t BK = BRGEMM_BK;
     auto &grantor = ctx.get_scratchpad_grantor();
-    char *ws = grantor.template get<char>(
-            memory_tracking::names::key_brgemm_primitive_buffer_a);
+    const bool pack_a = pd()->pack_a_;
+    char *ws = pack_a
+            ? grantor.template get<char>(
+                      memory_tracking::names::key_brgemm_primitive_buffer_a)
+            : nullptr;
 
     const int num_tiles = bdb + (bdb_tail > 0 ? 1 : 0);
     // int8 A is pre-widened to s32 inside the packing kernel (4 bytes/elem).
@@ -456,21 +488,26 @@ status_t rvv_brgemm_matmul_t::execute(const exec_ctx_t &ctx) const {
         // Tile start in the unpacked weights tensor (in_ts bytes/elem).
         const char *A_tile = weights + (dim_t)t * bd * in_ts;
 
-        jit_pack_a_tile_t::call_params_t pack_p;
-        pack_p.ws = ws;
-        pack_p.A = A_tile;
-        pack_p.LDA_orig = LDA_orig;
-        pack_p.bd = bd;
-        pack_p.valid_rows = rows;
-        pack_p.K_inner = K;
-        (*pack_kernel)(&pack_p);
+        // The A of the tile: packed into the workspace, or in place
+        const char *A_brg = weights + (dim_t)t * brg.stride_a_m_block * in_ts;
+        if (pack_a) {
+            jit_pack_a_tile_t::call_params_t pack_p;
+            pack_p.ws = ws;
+            pack_p.A = A_tile;
+            pack_p.LDA_orig = LDA_orig;
+            pack_p.bd = bd;
+            pack_p.valid_rows = rows;
+            pack_p.K_inner = K;
+            (*pack_kernel)(&pack_p);
+            A_brg = ws;
+        }
 
         for (dim_t kb = 0; kb < K; kb += BK) {
             const dim_t K_inner = nstl::min(BK, K - kb);
             const float beta_kb = (kb == 0) ? 0.0f : 1.0f;
 
             brgemm_kernel_params_t p;
-            p.ptr_A = ws + kb * bd * ws_typesize;
+            p.ptr_A = A_brg + kb * brg.LDA * ws_typesize;
             p.ptr_B = src + kb * in_ts;
             p.ptr_C = dst_char + (dim_t)t * bd * dst_typesize;
             p.N = total_N;
