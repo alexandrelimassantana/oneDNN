@@ -19,6 +19,7 @@
 
 #include "common/c_types_map.hpp"
 #include "cpu/rv64/cpu_isa_traits.hpp"
+#include "cpu/rv64/rvjit/rvjit_matmul.hpp"
 
 namespace dnnl {
 namespace impl {
@@ -56,9 +57,7 @@ struct brgemm_batch_element_t {
     };
 };
 
-// K-blocking tile size.  Chosen so that the A working set per M-tile
-// fits comfortably in the 32 KB L1D cache:
-//   bd_block(8) * BK(256) * 4 bytes = 8 KB.
+// K-blocking tile size: the K rows of A one call reads per M tile.
 static constexpr int BRGEMM_BK = 256;
 
 // BRGEMM descriptor: configured at init time, constants baked into JIT kernel.
@@ -81,14 +80,14 @@ struct brgemm_desc_t {
     dim_t stride_a, stride_b;
 
     // Blocking parameters (computed by brgemm_desc_init).
-    int bd_block; // M tile per vector (LMUL-dependent)
+    // The blocks rvjit tuned, which the kernel is pinned to
+    rvjit_matmul_blocks_t blocks;
+    int bd_block; // M tile: blocks.m_block()
     int bdb; // number of full bd_block tiles in M
     int bdb_tail; // remaining M rows
-
-    int n_step; // N columns processed per inner iteration (4)
-    int rd_block; // K unroll factor (4)
-    int rdb; // K / rd_block
-    int rdb_tail; // K % rd_block
+    // Elements of A between bd_block tiles: bd_block when A is contiguous
+    // along M (set by brgemm_desc_init), more for M-blocked weights
+    dim_t stride_a_m_block;
 
     bool is_f32;
     bool is_int8;
@@ -111,8 +110,10 @@ struct brgemm_kernel_params_t {
     dim_t M; // offset 32: actual rows in this tile
     dim_t K; // offset 40: reduction dimension (runtime, for K-blocking)
     float beta; // offset 48: 0.0f or 1.0f
+    uint32_t beta_hi; // zero: rvjit reads beta as 64 bits, set by the kernel
     const void
             *ptr_bias; // offset 56: bias vector (length M), nullptr if unused
+    uint64_t rt_flags; // set by the rvjit kernel: the features of this call
 };
 
 // Abstract JIT kernel base.

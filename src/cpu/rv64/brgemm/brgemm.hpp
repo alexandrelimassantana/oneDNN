@@ -30,6 +30,9 @@ status_t brgemm_desc_init(brgemm_desc_t *brg, cpu_isa_t isa,
         dim_t LDC, dim_t M, dim_t N, dim_t K,
         const brgemm_strides_t *strides = nullptr);
 
+// Sets the output type of `brg` (an f16 store) and re-tunes its blocks for it
+status_t brgemm_desc_set_dt_c(brgemm_desc_t *brg, data_type_t dt_c);
+
 status_t brgemm_kernel_create(
         brgemm_kernel_t **brg_kernel, const brgemm_desc_t &brg);
 
