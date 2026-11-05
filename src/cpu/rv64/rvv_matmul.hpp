@@ -302,6 +302,8 @@ struct rvv_matmul_t : public primitive_t {
         dim_t KB_ = 0;
         dim_t m_unroll_ = 0;
         bool do_copy_ = false;
+        // Whether a single-thread GEMM of the parallel batch loop packs
+        bool pack_single_ = false;
         // Weights of format any, laid out as the panels of the kernel's
         // strips (`prepacked_`) unless N is shorter than one strip
         bool wei_any_ = false;

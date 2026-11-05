@@ -15,10 +15,15 @@
 * limitations under the License.
 *******************************************************************************/
 #include <cmath>
+#include <cstdio>
+#include <string>
+
+#include "oneapi/dnnl/dnnl_debug.h"
 
 #include "common/dnnl_thread.hpp"
 #include "common/utils.hpp"
 
+#include "cpu/platform.hpp"
 #include "cpu/rv64/gemm/rvv_gemm_utils_f32.hpp"
 
 namespace dnnl {
@@ -145,6 +150,53 @@ void calc_nthr_nocopy_rvv(dim_t m, dim_t n, dim_t k, int nthrs, int *nthrs_m,
 #undef BM_SMALL_NOCOPY_RVV
 #undef BN_SMALL_NOCOPY_RVV
 #undef BK_SMALL_NOCOPY_RVV
+
+namespace {
+
+rvjit_part_scheme_t partition_scheme() {
+    static const rvjit_part_scheme_t scheme
+            = getenv_string_user("RV64_GEMM_PARTITION") == "legacy"
+            ? rvjit_part_scheme_t::legacy
+            : rvjit_part_scheme_t::balanced;
+    return scheme;
+}
+
+// The size of one way of L1, the largest row stride of A still read in
+// place at the fast rate. oneDNN knows the size on some CPUs and guesses
+// 32 KiB elsewhere; the ways are not queried, 8 is common
+int64_t stride_cliff() {
+    constexpr unsigned l1_ways = 8;
+    const unsigned l1 = platform::get_per_core_cache_size(1);
+    return l1 ? l1 / l1_ways : 0;
+}
+
+} // namespace
+
+gemm_partition_t rvjit_gemm_partition(rvjit_part_problem_t p, data_type_t dt) {
+    if (!p.stride_cliff) p.stride_cliff = stride_cliff();
+    rvjit_part_plan_t legacy {};
+    dim_t MB, NB, KB;
+    calc_nthr_nocopy_rvv(p.M, p.N, p.K, p.nthr, &legacy.nthr_m, &legacy.nthr_n,
+            &legacy.nthr_k, &MB, &NB, &KB);
+    legacy.MB = MB;
+    legacy.NB = NB;
+    legacy.KB = KB;
+    const rvjit_part_scheme_t scheme = partition_scheme();
+    const rvjit_part_plan_t r = rvjit_part_plan(p, scheme, legacy);
+
+    static const bool verbose
+            = getenv_int_user("RV64_GEMM_PARTITION_VERBOSE", 0) != 0;
+    if (verbose)
+        fprintf(stderr,
+                "rvjit_gemm_partition,%s,dt:%s,M:%ld,N:%ld,K:%ld,lda:%ld,"
+                "panels:%d,nthr:%d,plan:%dx%dx%d,MB:%ld,NB:%ld,KB:%ld,pack:%"
+                "d\n",
+                scheme == rvjit_part_scheme_t::legacy ? "legacy" : "balanced",
+                dnnl_dt2str(dt), (long)p.M, (long)p.N, (long)p.K,
+                (long)p.lda_bytes, (int)p.panels, p.nthr, r.nthr_m, r.nthr_n,
+                r.nthr_k, (long)r.MB, (long)r.NB, (long)r.KB, (int)r.pack);
+    return {r.nthr_m, r.nthr_n, r.nthr_k, r.MB, r.NB, r.KB, r.pack};
+}
 
 // Partition n values as equally as possible among nthr threads
 // and set the offset (t_offset) and number of values (t_block) for ithr

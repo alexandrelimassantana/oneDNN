@@ -134,28 +134,29 @@ status_t rvv_gemm_f16(const char *transa_, const char *transb_, const dim_t *M_,
         return status::success;
     }
 
-    int nthr_m, nthr_n, nthr_k;
-    dim_t MB, NB, KB;
-    if (part) {
-        nthr_m = part->nthr_m;
-        nthr_n = part->nthr_n;
-        MB = part->MB;
-        NB = part->NB;
-    } else {
-        int nthr = dnnl_get_current_num_threads();
-        calc_nthr_nocopy_rvv(
-                M, N, K, nthr, &nthr_m, &nthr_n, &nthr_k, &MB, &NB, &KB);
-    }
-    // The K axis is never split: the kernel stores the narrowed result once.
-    const int nthr_mn = nthr_m * nthr_n;
-
     rvjit_gemm_strips_t sc;
     CHECK(sc.init(rvjit_gemm_hp_conf(dt, dt), isTransA, kernel));
+
+    // The K axis is never split: the kernel stores the narrowed result once.
+    gemm_partition_t p;
+    if (part) {
+        p = *part;
+    } else {
+        constexpr dim_t BN_trans = gemm_traits_t<float, true, false>::BN;
+        constexpr dim_t BN = gemm_traits_t<float, false, false>::BN;
+        p = rvjit_gemm_partition(sc.problem(M, N, K, lda, 2, isTransA, ldb, 2,
+                                         isTransA ? BN_trans : BN, false,
+                                         dnnl_get_current_num_threads()),
+                dt);
+    }
+    const int nthr_m = p.nthr_m, nthr_n = p.nthr_n;
+    const dim_t MB = p.MB, NB = p.NB;
+    const int nthr_mn = nthr_m * nthr_n;
 
     // Every thread's rows start at a panel of a packed A
     assert(IMPLICATION(
             panels, !isTransA && (nthr_m == 1 || MB % panels->m_block == 0)));
-    const bool do_copy = !panels && sc.packs(NB);
+    const bool do_copy = !panels && p.pack;
     const size_t ws_elems_per_thr = K * sc.m_block() * 2;
     const size_t ws_size_per_thr = rnd_up(ws_elems_per_thr, PAGE_4K);
 
