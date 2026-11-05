@@ -23,6 +23,7 @@
 #include <cstddef>
 
 #include "cpu/rv64/cpu_isa_traits.hpp"
+#include "cpu/rv64/gemm/rvjit_gemm_partition.hpp"
 
 namespace dnnl {
 namespace impl {
@@ -63,6 +64,8 @@ void calc_nthr_nocopy_rvv(dim_t m, dim_t n, dim_t k, int nthrs, int *nthrs_m,
 // threadpool contexts (e.g. --ctx-init=1 --ctx-exe=8). A nullptr leaves the
 // driver to recompute the partition from dnnl_get_current_num_threads() and
 // malloc its own workspace (the path used by inner_product / convolution).
+// `pack` is whether the threads pack their whole strips of A, decided with
+// the partition so that the booking and the driver agree.
 struct gemm_partition_t {
     int nthr_m;
     int nthr_n;
@@ -70,7 +73,15 @@ struct gemm_partition_t {
     dim_t MB;
     dim_t NB;
     dim_t KB;
+    bool pack;
 };
+
+// The partition of the GEMM `p` over `p.nthr` threads, with its packing, by
+// the scheme ONEDNN_RV64_GEMM_PARTITION names (legacy, or balanced, the
+// default; see rvjit_gemm_partition.hpp), with L1's way size as the stride
+// cliff unless `p.stride_cliff` is set. ONEDNN_RV64_GEMM_PARTITION_VERBOSE=1
+// prints each decision, with `dt` the type of A, to stderr.
+gemm_partition_t rvjit_gemm_partition(rvjit_part_problem_t p, data_type_t dt);
 
 void partition_unit_diff(
         int ithr, int nthr, dim_t n, dim_t *t_offset, dim_t *t_block);

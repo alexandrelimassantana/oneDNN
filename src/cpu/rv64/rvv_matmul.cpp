@@ -37,19 +37,10 @@ namespace matmul {
 
 status_t rvv_matmul_t::pd_t::init_scratchpad() {
     using namespace memory_tracking::names;
-    using gemm_utils::calc_nthr_nocopy_rvv;
 
-    // Size the scratchpad with max_threads at init, then hand this same
-    // partition to the GEMM drivers at execute() (via gemm_partition_t) so the
-    // per-thread workspace offsets never exceed the booked capacity — even when
-    // init and execute run under different threadpool contexts. The drivers
-    // only recompute from dnnl_get_current_num_threads() when no partition is
-    // supplied (the inner_product / convolution callers).
     const int max_nthr = dnnl_get_max_threads();
     const dim_t gemm_M = N_;
     const dim_t gemm_N = weights_are_broadcast_ ? (batch_ * M_) : M_;
-    calc_nthr_nocopy_rvv(gemm_M, gemm_N, K_, max_nthr, &nthr_m_, &nthr_n_,
-            &nthr_k_, &MB_, &NB_, &KB_);
 
     // The kernel the primitive owns, its N and K loops sized to the driver's
     // blocks: A (the weights) is read untransposed, a transposed A packed
@@ -82,16 +73,40 @@ status_t rvv_matmul_t::pd_t::init_scratchpad() {
     // each thread's rows start at
     m_unroll_ = blocks.m_block();
     prepacked_ = wei_any_ && N_ >= m_unroll_;
-    if (prepacked_) {
-        CHECK(init_panels());
-        MB_ = utils::rnd_up(MB_, m_unroll_);
-        nthr_m_ = static_cast<int>(utils::div_up(gemm_M, MB_));
-    }
+    if (prepacked_) CHECK(init_panels());
 
-    // Every strip of a transposed A is packed; a plain one when N spans
-    // enough tiles to repay it
-    do_copy_
-            = !prepacked_ && (weights_col_major_ || NB_ / blocks.n_block() > 3);
+    // Size the scratchpad with max_threads at init, then hand this same
+    // partition to the GEMM drivers at execute() (via gemm_partition_t) so the
+    // per-thread workspace offsets never exceed the booked capacity — even when
+    // init and execute run under different threadpool contexts. The drivers
+    // only recompute from dnnl_get_current_num_threads() when no partition is
+    // supplied (the inner_product / convolution callers). Every strip of a
+    // transposed A is packed.
+    const size_t elem_size = is_int8_path_ ? sizeof(int8_t)
+            : is_hp_path_                  ? 2 // f16/bf16 elements
+                                           : sizeof(float);
+    gemm_utils::rvjit_part_problem_t prb {};
+    prb.M = gemm_M;
+    prb.N = gemm_N;
+    prb.K = K_;
+    prb.lda_bytes = (weights_col_major_ ? K_ : N_) * elem_size;
+    prb.a_elem_bytes = elem_size;
+    prb.ldb_bytes = K_ * types::data_type_size(src_d.data_type());
+    prb.m_block = m_unroll_;
+    prb.n_block = blocks.n_block();
+    prb.driver_bn = BN;
+    prb.panels = prepacked_;
+    prb.trans_a = prb.pack_all = weights_col_major_;
+    prb.k_split = k_blocked;
+    prb.nthr = max_nthr;
+    const auto part = gemm_utils::rvjit_gemm_partition(prb, wei_d.data_type());
+    nthr_m_ = part.nthr_m;
+    nthr_n_ = part.nthr_n;
+    nthr_k_ = part.nthr_k;
+    MB_ = part.MB;
+    NB_ = part.NB;
+    KB_ = part.KB;
+    do_copy_ = part.pack;
 
     const int nthr_mn = nthr_m_ * nthr_n_;
     const int nthr_to_use = nthr_mn * nthr_k_;
@@ -118,12 +133,15 @@ status_t rvv_matmul_t::pd_t::init_scratchpad() {
             = weights_are_broadcast_ ? 0 : nstl::min(batch_, (dim_t)max_nthr);
     ws_thr_slices_
             = static_cast<int>(nstl::max<dim_t>(nthr_to_use, batch_workers));
-    const bool per_batch_copy
-            = !prepacked_ && (weights_col_major_ || M_ / blocks.n_block() > 3);
-    if (do_copy_ || (batch_workers > 0 && per_batch_copy)) {
-        const size_t elem_size = is_int8_path_ ? sizeof(int8_t)
-                : is_hp_path_                  ? 2 // f16/bf16 elements
-                                               : sizeof(float);
+    if (batch_workers > 0) {
+        gemm_utils::rvjit_part_problem_t single = prb;
+        single.N = M_;
+        single.nthr = 1;
+        pack_single_
+                = gemm_utils::rvjit_gemm_partition(single, wei_d.data_type())
+                          .pack;
+    }
+    if (do_copy_ || (batch_workers > 0 && pack_single_)) {
         ws_slice_bytes_
                 = utils::rnd_up((size_t)K_ * m_unroll_ * elem_size, PAGE_4K);
         scratchpad.template book<char>(
@@ -258,10 +276,10 @@ status_t rvv_matmul_t::execute(const exec_ctx_t &ctx) const {
     // never exceed the booked capacity, even when init and execute run under
     // different threadpool contexts.
     const gemm_utils::gemm_partition_t part {pd()->nthr_m_, pd()->nthr_n_,
-            pd()->nthr_k_, pd()->MB_, pd()->NB_, pd()->KB_};
+            pd()->nthr_k_, pd()->MB_, pd()->NB_, pd()->KB_, pd()->do_copy_};
     // Single-thread partition for the parallel batch loop (run_batch_gemm).
     const gemm_utils::gemm_partition_t part_single {
-            1, 1, 1, g.M_gemm, g.N_gemm, g.K_gemm};
+            1, 1, 1, g.M_gemm, g.N_gemm, g.K_gemm, pd()->pack_single_};
 
     const int src_batch_ndims = ndims > 2 ? ndims - 2 : 0;
     const int wei_batch_ndims = wei_ndims > 2 ? wei_ndims - 2 : 0;

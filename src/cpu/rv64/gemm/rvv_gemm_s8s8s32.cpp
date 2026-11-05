@@ -243,22 +243,6 @@ status_t rvv_gemm_s8s8s32(const char *transa_, const char *transb_,
     // Early out: avoid division by zero in partitioning.
     if (utils::one_of(0, M, N)) return status::success;
 
-    int nthr_m, nthr_n, nthr_k;
-    dim_t MB, NB, KB;
-    if (part) {
-        nthr_m = part->nthr_m;
-        nthr_n = part->nthr_n;
-        nthr_k = part->nthr_k;
-        MB = part->MB;
-        NB = part->NB;
-        KB = part->KB;
-    } else {
-        int nthr = dnnl_get_current_num_threads();
-        calc_nthr_nocopy_rvv(
-                M, N, K, nthr, &nthr_m, &nthr_n, &nthr_k, &MB, &NB, &KB);
-    }
-    assert(IMPLICATION(!dnnl_thr_syncable(), nthr_k == 1));
-
     rvjit_gemm_conf_t conf = rvjit_gemm_int8_conf(
             a_signed ? data_type::s8 : data_type::u8,
             b_signed ? data_type::s8 : data_type::u8, dst_dt, bias_is_scalar);
@@ -266,10 +250,28 @@ status_t rvv_gemm_s8s8s32(const char *transa_, const char *transb_,
     rvjit_gemm_strips_t sc;
     CHECK(sc.init(conf, isTransA, kernel));
 
+    gemm_partition_t p;
+    if (part) {
+        p = *part;
+    } else {
+        constexpr dim_t BN_trans = gemm_traits_t<float, true, false>::BN;
+        constexpr dim_t BN = gemm_traits_t<float, false, false>::BN;
+        p = rvjit_gemm_partition(
+                sc.problem(M, N, K, lda, 1, isTransA, ldb, 1,
+                        isTransA ? BN_trans : BN, dst_supports_k_split(dst_dt),
+                        dnnl_get_current_num_threads()),
+                a_signed ? data_type::s8 : data_type::u8);
+    }
+    const int nthr_m = p.nthr_m, nthr_n = p.nthr_n;
+    int nthr_k = p.nthr_k;
+    const dim_t MB = p.MB, NB = p.NB;
+    dim_t KB = p.KB;
+    assert(IMPLICATION(!dnnl_thr_syncable(), nthr_k == 1));
+
     // Every thread's rows start at a panel of a packed A
     assert(IMPLICATION(
             panels, !isTransA && (nthr_m == 1 || MB % panels->m_block == 0)));
-    bool do_copy = !panels && sc.packs(NB);
+    bool do_copy = !panels && p.pack;
     const int nthr_mn = nthr_m * nthr_n;
     const size_t ws_elems_per_thr = K * sc.m_block();
     const size_t ws_size_per_thr

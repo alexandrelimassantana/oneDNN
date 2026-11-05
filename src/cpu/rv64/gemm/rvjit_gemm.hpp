@@ -25,6 +25,7 @@
 #include "common/nstl.hpp"
 #include "common/utils.hpp"
 
+#include "cpu/rv64/gemm/rvjit_gemm_partition.hpp"
 #include "cpu/rv64/rvjit/rvjit_matmul.hpp"
 
 namespace dnnl {
@@ -142,9 +143,28 @@ struct rvjit_gemm_strips_t {
     // The rows of a strip, which the per-thread A workspace holds
     dim_t m_block() const { return nontrans_a_ker->m_block(); }
 
-    // Whether a thread computing `n` columns packs its whole strips
-    bool packs(dim_t n) const {
-        return pack_all || n / nontrans_a_ker->blocks.n_block() > 3;
+    // A call of a driver whose N blocks are `driver_bn` columns, over
+    // `nthr` threads, to split with rvjit_gemm_partition: A (`a_size`-byte
+    // elements, transposed when `trans_a`) and B (`b_size`-byte) at their
+    // leading dimensions, K split over threads when `k_split`
+    rvjit_part_problem_t problem(dim_t M, dim_t N, dim_t K, dim_t lda,
+            dim_t a_size, bool trans_a, dim_t ldb, dim_t b_size,
+            dim_t driver_bn, bool k_split, int nthr) const {
+        rvjit_part_problem_t p {};
+        p.M = M;
+        p.N = N;
+        p.K = K;
+        p.lda_bytes = lda * a_size;
+        p.a_elem_bytes = a_size;
+        p.ldb_bytes = ldb * b_size;
+        p.m_block = m_block();
+        p.n_block = nontrans_a_ker->blocks.n_block();
+        p.driver_bn = driver_bn;
+        p.trans_a = trans_a;
+        p.pack_all = pack_all;
+        p.k_split = k_split;
+        p.nthr = nthr;
+        return p;
     }
 
     // Computes the M rows of a block of C, a strip at a time, from `args`
