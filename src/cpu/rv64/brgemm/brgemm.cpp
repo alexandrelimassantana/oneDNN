@@ -15,6 +15,8 @@
 *******************************************************************************/
 
 #include <cstddef>
+#include <cstdio>
+#include <cstdlib>
 #include <memory>
 #include <type_traits>
 
@@ -52,6 +54,16 @@ bool brgemm_uses_rvjit(const brgemm_desc_t &brg) {
             || (brg.dt_c == data_type::f16 && brg.dt_a == data_type::f16);
 }
 
+// Experiment toggles, read from the environment (0 or unset leaves the
+// tuned value): RVJIT_GEOM_LMUL forces the register grouping, and
+// RVJIT_GEOM_MB, _NB and _KB the unrolls of the M, N and K loops, in
+// granules, after rvjit tuned them. RVJIT_GEOM_PRINT prints the geometry of
+// each descriptor to stderr.
+int geom_env(const char *name) {
+    const char *v = std::getenv(name);
+    return v ? std::atoi(v) : 0;
+}
+
 // The matmul a descriptor stands for.
 //
 // The beta, the bias and the flags selecting them are read from the
@@ -68,6 +80,7 @@ rvjit_matmul_desc_t make_desc(
     using p_t = brgemm_kernel_params_t;
     const bool int8 = brg.is_int8;
     rvjit_matmul_desc_t d;
+    d.lmul = geom_env("RVJIT_GEOM_LMUL");
     d.a = rvjit_type_t(int8 ? data_type::s32 : brg.dt_a);
     d.b = rvjit_type_t(brg.dt_b, int8 ? data_type::s32 : data_type::undef);
     d.c = rvjit_type_t(brg.dt_c, int8 ? data_type::s32 : data_type::f32);
@@ -128,6 +141,23 @@ status_t brgemm_tune(brgemm_desc_t *brg) {
     // The blocks of the whole problem, which the kernel is then pinned to
     CHECK(rvjit_matmul_tune(
             make_desc(*brg, m_bound, brg->n_bound), brg->blocks));
+    if (geom_env("RVJIT_GEOM_MB"))
+        brg->blocks.m_unroll = geom_env("RVJIT_GEOM_MB");
+    if (geom_env("RVJIT_GEOM_NB"))
+        brg->blocks.n_unroll = geom_env("RVJIT_GEOM_NB");
+    if (geom_env("RVJIT_GEOM_KB"))
+        brg->blocks.k_unroll = geom_env("RVJIT_GEOM_KB");
+    if (geom_env("RVJIT_GEOM_PRINT")) {
+        const auto &b = brg->blocks;
+        std::fprintf(stderr,
+                "rvjit geometry: M=%lld N=%lld K=%lld ldb=%lld m_unroll=%d "
+                "m_grain=%d n_unroll=%d n_grain=%d k_unroll=%d k_grain=%d "
+                "wei_tile=%d n_bound=%lld m_bound=%lld\n",
+                (long long)brg->bcast_dim, (long long)brg->load_dim,
+                (long long)brg->reduce_dim, (long long)brg->LDB, b.m_unroll,
+                b.m_grain, b.n_unroll, b.n_grain, b.k_unroll, b.k_grain,
+                brg->wei_tile, (long long)brg->n_bound, (long long)m_bound);
+    }
     brg->bd_block = brg->blocks.m_block();
     if (brg->wei_tile) {
         // The kernel's tile must divide the weights' tile
