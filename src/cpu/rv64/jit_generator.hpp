@@ -18,6 +18,9 @@
 #define CPU_RV64_JIT_GENERATOR_HPP
 
 #include <cstdint>
+#include <cstdio>
+#include <cstdlib>
+#include <string>
 #include <utility>
 
 #include "common/c_types_map.hpp"
@@ -61,6 +64,33 @@ inline bool is_subset(cpu_isa_t isa, cpu_isa_t max_isa) {
             == static_cast<u_t>(isa);
 }
 
+// With RV64_JIT_DUMP_DIR set, writes each generated kernel to
+// <dir>/<name>_<n>.s as .insn words, which the RISC-V assembler and objdump
+// disassemble
+inline void experiment_dump_kernel(
+        const uint8_t *code, size_t size, const char *kernel_name) {
+    const char *dir = std::getenv("RV64_JIT_DUMP_DIR");
+    if (!dir || !code) return;
+    static int count = 0;
+    const std::string path = std::string(dir) + "/" + kernel_name + "_"
+            + std::to_string(count++) + ".s";
+    FILE *f = std::fopen(path.c_str(), "w");
+    if (!f) return;
+    std::fputs(".text\n", f);
+    size_t pos = 0;
+    while (pos < size) {
+        const size_t n = (code[pos] & 3) == 3 ? 4 : 2;
+        if (pos + n > size) break;
+        unsigned word = 0;
+        for (size_t i = 0; i < n; i++)
+            word |= static_cast<unsigned>(code[pos + i]) << (8 * i);
+        std::fprintf(
+                f, ".insn %zu, 0x%0*x\n", n, static_cast<int>(n * 2), word);
+        pos += n;
+    }
+    std::fclose(f);
+}
+
 // Minimal RV64 JIT generator base class.
 class jit_generator_t : public Xbyak_riscv::CodeGenerator {
 public:
@@ -98,6 +128,8 @@ public:
         jit_ker_ = Xbyak_riscv::CodeGenerator::getCode();
 
         if (jit_ker_) {
+            experiment_dump_kernel(
+                    jit_ker_, Xbyak_riscv::CodeArray::getSize(), name());
             jit_utils::register_jit_code(jit_ker_,
                     Xbyak_riscv::CodeArray::getSize(), name(), source_file());
             return status::success;
